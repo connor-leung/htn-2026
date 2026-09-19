@@ -1,3 +1,12 @@
+--[==[badge-app
+slug=goose_duel
+name=Goose Duel
+icon=GG
+api=2
+heap_kb=48
+wake_lock=1
+]==]
+
 -- Goose Duel - a Waterloo goose battler for the 2026 Hacker Badge.
 --
 -- Controls

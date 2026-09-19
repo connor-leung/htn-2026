@@ -248,7 +248,8 @@ def check_lua(lua, report, offset, manifest):
     for idx, line in enumerate(raw_lines):
         ln = offset + idx + 1
         # String bodies are blanked in `code`, so scan the raw line for these.
-        if re.search(r"==\s*[\"'](A|B|HOME|UP|DOWN|LEFT|RIGHT|START|AUX1)[\"']", line):
+        if re.search(r"\b(button|btn|b|key|press)\s*==\s*"
+                     r"[\"'](A|B|HOME|UP|DOWN|LEFT|RIGHT|START|AUX1)[\"']", line):
             report.error(ln, "buttons are integers; compare against badge.input.BUTTON.*")
         if re.search(r"KIND\s*==\s*[\"'](PRESSED|RELEASED)[\"']", line):
             report.error(ln, "button kinds are integers; use badge.input.KIND.PRESSED")
