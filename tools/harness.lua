@@ -85,7 +85,14 @@ function M.new(name, seed)
       for i = 1, 6 do badge.led.set(i, r, g, bl) end
     end,
     clear = function() b.leds = {} end,
-    show = function() b.led_shown = b.led_shown + 1 end,
+    show = function()
+      b.led_shown = b.led_shown + 1
+      -- Crude proxy for LED energy: sum of all channel values latched, which
+      -- is what actually drives current through the strip.
+      local sum = 0
+      for _, c in pairs(b.leds) do sum = sum + c[1] + c[2] + c[3] end
+      b.led_energy = (b.led_energy or 0) + sum
+    end,
   }
 
   badge.sys = {
@@ -96,7 +103,10 @@ function M.new(name, seed)
     version = function() return "mock-1.0" end,
     heap = function() return 1024 end,
     gc_step = function() end,
-    wake_lock = function() end,
+    wake_lock = function(on)
+      b.wake = on and true or false
+      b.wake_changes = (b.wake_changes or 0) + 1
+    end,
     stats = function()
       return { lua_used = 1024, lua_peak = 2048, lua_limit = 49152,
                widgets = b.widgets, uptime_ms = b.now, free_heap = 60000 }

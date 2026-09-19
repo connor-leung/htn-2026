@@ -27,6 +27,7 @@ LVGL allocation, or flash latency.
 ```bash
 python3 tools/build.py                  # main.lua + manifest.cfg -> goose_duel.lua
 lua tools/test_battle.lua               # play the real main.lua against a mock badge
+lua tools/test_power.lua                # LED energy, idle blanking, wake lock, radio
 python3 .claude/skills/badge-app/scripts/check_app.py goose_duel.lua
 luac -p main.lua                        # syntax only (brew install lua)
 ```

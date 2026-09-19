@@ -4,7 +4,6 @@ name=Goose Duel
 icon=GG
 api=2
 heap_kb=96
-wake_lock=1
 ]==]
 
 local MOVE_DATA =
@@ -70,8 +69,21 @@ local function rnd(n)
   rng = (rng * 75 + 74) % 65537
   return rng % n
 end
+local LED_STEP = { 0, 60, 140, 255 }
+local LED_NAME = { "Off", "Low", "Med", "Full" }
+local led_level = 2
 local led_at = 0
+local led_scale = 255
+local led_blank = false
+local last_input = 0
 local flash_until, flash_side, flash_rgb = 0, 0, nil
+local function ledset(i, r, g, b)
+  badge.led.set(i, r * led_scale // 255, g * led_scale // 255,
+    b * led_scale // 255)
+end
+local function ledall(r, g, b)
+  for i = 1, 6 do ledset(i, r, g, b) end
+end
 local function make_fighter(species, level, who)
   local g = GEESE[species]
   local l = level - 1
@@ -130,7 +142,8 @@ local function render_menu()
   end
   local g = GEESE[save.species]
   ui.menu_you:set_text(g.name .. "  Lv" .. save.level ..
-    "  W" .. save.wins .. " L" .. save.losses)
+    "  W" .. save.wins .. " L" .. save.losses ..
+    "   LEDs " .. LED_NAME[led_level])
 end
 local function render_pick()
   for i = 1, 4 do
@@ -181,6 +194,8 @@ local function load_save()
   save.xp = badge.store.get_int("gxp", 0)
   save.wins = badge.store.get_int("gwin", 0)
   save.losses = badge.store.get_int("gloss", 0)
+  led_level = badge.store.get_int("gled", 2)
+  if led_level < 1 or led_level > 4 then led_level = 2 end
   if save.species < 1 or save.species > #GEESE then save.species = 1 end
   if save.level < 1 then save.level = 1 end
 end
@@ -191,12 +206,14 @@ local function flush_save()
   badge.store.set_int("gxp", save.xp)
   badge.store.set_int("gwin", save.wins)
   badge.store.set_int("gloss", save.losses)
+  badge.store.set_int("gled", led_level)
   dirty = false
 end
 local function radio_send(msg)
   if radio_on then badge.radio.send(msg) end
 end
 local function radio_stop()
+  badge.sys.wake_lock(false)
   if radio_on then
     if outcome == 0 then radio_send("GG1:B:" .. my_id) end
     badge.radio.on_recv(nil)
@@ -358,7 +375,7 @@ local function led_column(base, frac, r, g, b)
   local lit = frac * 3
   for i = 1, 3 do
     if lit >= i - 0.34 then
-      badge.led.set(base[i], r, g, b)
+      ledset(base[i], r, g, b)
     end
   end
 end
@@ -366,8 +383,21 @@ local LEFT = { 1, 6, 5 }
 local RIGHT = { 2, 3, 4 }
 local RING = { 1, 2, 3, 4, 5, 6 }
 local function draw_leds(now)
-  if now - led_at < 50 then return end
+  if now - led_at < 90 then return end
   led_at = now
+  led_scale = LED_STEP[led_level]
+  if (st == ST_MENU or st == ST_PICK) and now - last_input > 20000 then
+    led_scale = 0
+  end
+  if led_scale == 0 then
+    if not led_blank then
+      badge.led.clear()
+      badge.led.show()
+      led_blank = true
+    end
+    return
+  end
+  led_blank = false
   badge.led.clear()
   if st == ST_MENU or st == ST_PICK then
     local sp = (st == ST_PICK) and pick_sel or save.species
@@ -375,22 +405,22 @@ local function draw_leds(now)
     local phase = now % 2400
     if phase > 1200 then phase = 2400 - phase end
     local k = phase * 255 // 1200
-    badge.led.set_all(c[1] * k // 255, c[2] * k // 255, c[3] * k // 255)
+    ledall(c[1] * k // 255, c[2] * k // 255, c[3] * k // 255)
   elseif st == ST_SEEK then
     local step = (now // 150) % 6 + 1
-    badge.led.set(RING[step], 0, 180, 255)
+    ledset(RING[step], 0, 180, 255)
     local trail = (step == 1) and 6 or step - 1
-    badge.led.set(RING[trail], 0, 50, 90)
+    ledset(RING[trail], 0, 50, 90)
   elseif me and foe then
     if st == ST_RESULT and outcome == 1 then
       local step = (now // 120) % 6 + 1
-      badge.led.set(RING[step], 255, 200, 0)
-      badge.led.set(RING[(step % 6) + 1], 90, 70, 0)
+      ledset(RING[step], 255, 200, 0)
+      ledset(RING[(step % 6) + 1], 90, 70, 0)
     elseif st == ST_RESULT then
       local phase = now % 1600
       if phase > 800 then phase = 1600 - phase end
       local k = phase * 160 // 800
-      badge.led.set_all(k, 0, 0)
+      ledall(k, 0, 0)
     else
       local mf = me.hp / me.max
       local ff = foe.hp / foe.max
@@ -402,7 +432,7 @@ local function draw_leds(now)
     if now < flash_until and flash_rgb then
       local side = (flash_side == 1) and LEFT or RIGHT
       for i = 1, 3 do
-        badge.led.set(side[i], flash_rgb[1], flash_rgb[2], flash_rgb[3])
+        ledset(side[i], flash_rgb[1], flash_rgb[2], flash_rgb[3])
       end
     end
   end
@@ -429,6 +459,7 @@ local function begin_seek()
     return
   end
   badge.radio.on_recv(on_radio)
+  badge.sys.wake_lock(true)
   st = ST_SEEK
   last_rx = badge.sys.ms()
   next_beacon = 0
@@ -480,7 +511,7 @@ function on_enter(root)
     ui.menu_item[i] = lbl(ui.menu, "", nil, false, "top_left", 40, 30 + (i - 1) * 26)
   end
   ui.menu_you = lbl(ui.menu, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
-  lbl(ui.menu, "UP/DOWN choose   A select   HOME exit", 0x6b7280, true,
+  lbl(ui.menu, "UP/DOWN choose  A select  L/R LEDs  HOME exit", 0x6b7280, true,
     "bottom_mid", 0, -10)
   ui.pick = panel(bg)
   ui.pick_item = {}
@@ -513,10 +544,10 @@ function on_tick()
       next_beacon = now + 500
       radio_send("GG1:H:" .. my_id .. ":" .. save.species .. ":" .. save.level)
     end
-    if now - last_rx > 30000 then
-      say("No other goose found nearby.")
-      status("Still searching. B cancels.")
-      last_rx = now
+    if now - last_rx > 60000 then
+      go_menu()
+      say("No goose nearby. Radio off to save battery.")
+      status("A to search again.")
     end
   elseif st == ST_BATTLE and is_radio then
     if host and not peer_confirmed and now >= next_beacon then
@@ -564,6 +595,8 @@ local function choose_move()
 end
 function on_button(button, kind)
   if kind ~= badge.input.KIND.PRESSED then return end
+  last_input = badge.sys.ms()
+  led_blank = false
   local B = badge.input.BUTTON
   if st == ST_MENU then
     if button == B.UP then
@@ -571,6 +604,14 @@ function on_button(button, kind)
       render_menu()
     elseif button == B.DOWN then
       menu_sel = (menu_sel == 3) and 1 or menu_sel + 1
+      render_menu()
+    elseif button == B.LEFT or button == B.RIGHT then
+      if button == B.RIGHT then
+        led_level = (led_level == 4) and 1 or led_level + 1
+      else
+        led_level = (led_level == 1) and 4 or led_level - 1
+      end
+      dirty = true
       render_menu()
     elseif button == B.A then
       if menu_sel == 1 then
