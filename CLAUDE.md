@@ -8,17 +8,40 @@ troubleshooting table). It is the source of truth — when this file and
 
 ## Workspace layout
 
-| Path            | Purpose                                                        |
-| --------------- | -------------------------------------------------------------- |
-| `README.md`     | Platform brief from the badge team. Reference, not app code.    |
-| `manifest.cfg`  | Current app's config (`key=value`). Mirrors the IDE file.       |
-| `main.lua`      | Current app's code. Mirrors the IDE file.                       |
-| `apps/<slug>/`  | Optional: keep other apps here so the IDE workspace stays clean.|
+| Path               | Purpose                                                       |
+| ------------------ | ------------------------------------------------------------- |
+| `README.md`        | Platform brief from the badge team. Reference, not app code.   |
+| `main.lua`         | Active app's code (Goose Duel). Commented, readable source.    |
+| `manifest.cfg`     | Active app's config (`key=value`).                             |
+| `goose_duel.lua`   | **Build output** - the single file to Import. Do not hand-edit.|
+| `apps/<slug>/`     | Other apps, one directory each (e.g. `apps/pixel_goose/`).     |
+| `tools/`           | Build and test scripts. Never pushed to the badge.             |
 
-There is no build, test, or deploy step in this repo. The badge is programmed
-through the [Badge IDE](https://badge.hackthenorth.com/ide/) in desktop Chrome
-or Edge over USB. Nothing here compiles or runs Lua; the badge is the only
-real test environment.
+The badge is programmed through the
+[Badge IDE](https://badge.hackthenorth.com/ide/) in desktop Chrome or Edge over
+USB. Only hardware proves an app works: nothing here reproduces ESP32 timing,
+LVGL allocation, or flash latency.
+
+### Build and test
+
+```bash
+python3 tools/build.py                  # main.lua + manifest.cfg -> goose_duel.lua
+lua tools/test_battle.lua               # play the real main.lua against a mock badge
+python3 .claude/skills/badge-app/scripts/check_app.py goose_duel.lua
+luac -p main.lua                        # syntax only (brew install lua)
+```
+
+**Always run `tools/build.py` after editing `main.lua`** - `goose_duel.lua` is
+generated, and it ships with comments and blank lines stripped because the badge
+compiles the entire file before `on_enter` runs, and that compile is what hits
+the Lua memory ceiling.
+
+`tools/harness.lua` mocks the documented `badge.*` API - widgets, LEDs, store,
+buttons, and a radio two instances can talk over - so `main.lua` can be driven
+through real battles, including duels with injected frame loss and duplication.
+It asserts the documented limits (integer LED channels, 44-byte payloads, the
+512-widget cap), so a violation fails the test rather than surfacing on device.
+It is a model of the badge, not the badge.
 
 ## Skills
 
