@@ -11,6 +11,7 @@ troubleshooting table). It is the source of truth — when this file and
 | Path               | Purpose                                                       |
 | ------------------ | ------------------------------------------------------------- |
 | `README.md`        | Platform brief from the badge team. Reference, not app code.   |
+| `DESIGN.md`        | What Goose Duel is, why it is built this way, what is verified. |
 | `main.lua`         | Active app's code (Goose Duel). Commented, readable source.    |
 | `manifest.cfg`     | Active app's config (`key=value`).                             |
 | `goose_duel.lua`   | **Build output** - the single file to Import. Do not hand-edit.|
