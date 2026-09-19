@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build goose_duel.lua (the file you Import) from manifest.cfg + main.lua.
 
-Comments and blank lines are stripped from the shipped copy. The badge
+Comments, blank lines and indentation are stripped from the shipped copy. The badge
 compiles the whole file before on_enter runs, and that compile is what hits
 the Lua memory ceiling, so every byte of source the badge never needs is
 worth removing. main.lua itself stays commented and readable.
@@ -50,11 +50,18 @@ def main():
     with open(MANIFEST, encoding="utf-8") as f:
         manifest = f.read().rstrip("\n")
 
+    # A long-bracket string would make indentation significant; this app has
+    # none, and silently reflowing one would corrupt it.
+    if re.search(r"(?<!-)\[=*\[", src):
+        raise SystemExit("build.py: long-bracket strings are not supported")
+
     kept = []
     for line in src.splitlines():
         s = strip_line(line)
         if s is not None:
-            kept.append(s)
+            # Lua ignores leading whitespace, and it is ~10% of the source the
+            # badge has to lex before on_enter runs.
+            kept.append(s.lstrip())
     body = "\n".join(kept) + "\n"
 
     bundle = "--[==[badge-app\n" + manifest + "\n]==]\n\n" + body
