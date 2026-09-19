@@ -28,8 +28,13 @@ local GOOSE_DATA =
 local TYPE_NAME = { "Honk", "Peck", "Flap" }
 local TYPE_RGB = { { 255, 80, 200 }, { 255, 150, 0 }, { 0, 190, 255 } }
 
-local MOVES = {}
-local GEESE = {}
+-- Flat parallel arrays, not tables of records. 22 string-keyed hash tables
+-- cost far more retained memory than 10 sequence-only arrays, and retained
+-- memory is what the system allocator runs out of on this badge.
+local NG = 4                       -- number of geese
+local MV_NAME, MV_TY, MV_POW = {}, {}, {}
+local G_NAME, G_TY, G_HP, G_ATK, G_DEF, G_SPD = {}, {}, {}, {}, {}, {}
+local G_M = {}                     -- moves, flat: (species - 1) * 4 + slot
 
 local function split(s, sep)
   local out = {}
@@ -43,17 +48,21 @@ local function load_data()
   local recs = split(MOVE_DATA, ";")
   for i = 1, #recs do
     local f = split(recs[i], ",")
-    MOVES[i] = { name = f[1], ty = tonumber(f[2]), pow = tonumber(f[3]) }
+    MV_NAME[i] = f[1]
+    MV_TY[i] = tonumber(f[2])
+    MV_POW[i] = tonumber(f[3])
   end
   recs = split(GOOSE_DATA, ";")
   for i = 1, #recs do
     local f = split(recs[i], ",")
-    GEESE[i] = {
-      name = f[1], ty = tonumber(f[2]),
-      hp = tonumber(f[3]), atk = tonumber(f[4]),
-      def = tonumber(f[5]), spd = tonumber(f[6]),
-      moves = { tonumber(f[7]), tonumber(f[8]), tonumber(f[9]), tonumber(f[10]) },
-    }
+    G_NAME[i] = f[1]
+    G_TY[i] = tonumber(f[2])
+    G_HP[i] = tonumber(f[3])
+    G_ATK[i] = tonumber(f[4])
+    G_DEF[i] = tonumber(f[5])
+    G_SPD[i] = tonumber(f[6])
+    local b = (i - 1) * 4
+    for k = 1, 4 do G_M[b + k] = tonumber(f[6 + k]) end
   end
 end
 
@@ -118,15 +127,19 @@ end
 
 -- combat
 local function make_fighter(species, level, who)
-  local g = GEESE[species]
   local l = level - 1
-  local max = g.hp + l * 4
+  local max = G_HP[species] + l * 4
   return {
-    sp = species, level = level, name = g.name, ty = g.ty,
+    sp = species, level = level, name = G_NAME[species], ty = G_TY[species],
     hp = max, max = max,
-    atk = g.atk + l * 2, def = g.def + l * 2, spd = g.spd + l,
-    moves = g.moves, who = who,
+    atk = G_ATK[species] + l * 2, def = G_DEF[species] + l * 2,
+    spd = G_SPD[species] + l, who = who,
   }
+end
+
+-- move id for slot `i` of a fighter
+local function mv_of(f, i)
+  return G_M[(f.sp - 1) * 4 + i]
 end
 
 -- 1 = super effective, -1 = resisted, 0 = neutral. Honk > Flap > Peck > Honk.
@@ -142,9 +155,8 @@ local function effect(atk_ty, def_ty)
 end
 
 local function damage(att, def, mv)
-  local m = MOVES[mv]
-  local raw = (m.pow * att.atk) // (def.def * 8) + 2
-  local e = effect(m.ty, def.ty)
+  local raw = (MV_POW[mv] * att.atk) // (def.def * 8) + 2
+  local e = effect(MV_TY[mv], def.ty)
   if e == 1 then
     raw = raw * 3 // 2
   elseif e == -1 then
@@ -181,22 +193,19 @@ local function render_menu()
     ui.menu_item[i]:set_text(mark .. items[i])
     ui.menu_item[i]:set_color(i == menu_sel and 0xffffff or 0x8a93a0)
   end
-  local g = GEESE[save.species]
-  ui.menu_you:set_text(g.name .. "  Lv" .. save.level ..
+  ui.menu_you:set_text(G_NAME[save.species] .. "  Lv" .. save.level ..
     "  W" .. save.wins .. " L" .. save.losses ..
     "   LEDs " .. LED_NAME[led_level])
 end
 
 local function render_pick()
   for i = 1, 4 do
-    local g = GEESE[i]
     local mark = (i == pick_sel) and "> " or "  "
-    ui.pick_item[i]:set_text(mark .. g.name .. " (" .. TYPE_NAME[g.ty] .. ")")
+    ui.pick_item[i]:set_text(mark .. G_NAME[i] .. " (" .. TYPE_NAME[G_TY[i]] .. ")")
     ui.pick_item[i]:set_color(i == pick_sel and 0xffffff or 0x8a93a0)
   end
-  local g = GEESE[pick_sel]
-  ui.pick_stat:set_text("HP " .. g.hp .. "  ATK " .. g.atk ..
-    "  DEF " .. g.def .. "  SPD " .. g.spd)
+  ui.pick_stat:set_text("HP " .. G_HP[pick_sel] .. "  ATK " .. G_ATK[pick_sel] ..
+    "  DEF " .. G_DEF[pick_sel] .. "  SPD " .. G_SPD[pick_sel])
 end
 
 local function render_moves()
@@ -206,11 +215,11 @@ local function render_moves()
     if not me then
       lbl:set_text("")
     else
-      local m = MOVES[me.moves[i]]
+      local mv = mv_of(me, i)
       local mark = (i == move_sel and not hide) and ">" or " "
       -- "Honk Blast H40": type initial + power, readable against the tags.
-      lbl:set_text(mark .. m.name .. " " ..
-        string.sub(TYPE_NAME[m.ty], 1, 1) .. m.pow)
+      lbl:set_text(mark .. MV_NAME[mv] .. " " ..
+        string.sub(TYPE_NAME[MV_TY[mv]], 1, 1) .. MV_POW[mv])
       lbl:set_color((i == move_sel and not hide) and 0xffffff or 0x8a93a0)
     end
   end
@@ -246,7 +255,7 @@ local function load_save()
   save.losses = badge.store.get_int("gloss", 0)
   led_level = badge.store.get_int("gled", 2)
   if led_level < 1 or led_level > 4 then led_level = 2 end
-  if save.species < 1 or save.species > #GEESE then save.species = 1 end
+  if save.species < 1 or save.species > NG then save.species = 1 end
   if save.level < 1 then save.level = 1 end
 end
 
@@ -410,12 +419,12 @@ local function strike(att, def, mv, label)
   if def.hp < 0 then def.hp = 0 end
   flash_until = badge.sys.ms() + 260
   flash_side = def.who
-  flash_rgb = TYPE_RGB[MOVES[mv].ty]
-  say(label .. " " .. MOVES[mv].name .. " for " .. dmg .. eff_word(e))
+  flash_rgb = TYPE_RGB[MV_TY[mv]]
+  say(label .. " " .. MV_NAME[mv] .. " for " .. dmg .. eff_word(e))
 end
 
 local function resolve()
-  local mine, theirs = me.moves[my_move], foe.moves[foe_move]
+  local mine, theirs = mv_of(me, my_move), mv_of(foe, foe_move)
   local me_first
   if me.spd ~= foe.spd then
     me_first = me.spd > foe.spd
@@ -454,8 +463,8 @@ local function cpu_move()
   if badge.sys.random(10) < 5 then return badge.sys.random(4) + 1 end
   local best, best_score = 1, -1
   for i = 1, 4 do
-    local m = MOVES[foe.moves[i]]
-    local score = m.pow + effect(m.ty, me.ty) * 20
+    local mv = mv_of(foe, i)
+    local score = MV_POW[mv] + effect(MV_TY[mv], me.ty) * 20
     if score > best_score then best, best_score = i, score end
   end
   return best
@@ -500,7 +509,7 @@ local function draw_leds(now)
 
   if st == ST_MENU or st == ST_PICK then
     local sp = (st == ST_PICK) and pick_sel or save.species
-    local c = TYPE_RGB[GEESE[sp].ty]
+    local c = TYPE_RGB[G_TY[sp]]
     -- triangle-wave breathing, no float math needed beyond the scale
     local phase = now % 2400
     if phase > 1200 then phase = 2400 - phase end
@@ -614,6 +623,9 @@ end
 function on_enter(root)
   load_data()
   load_save()
+  -- Drop the parsing garbage before building any widgets.
+  badge.sys.gc_step()
+  badge.sys.gc_step()
 
   local bg = badge.ui.box{ parent = root, w = 320, h = 240, bg_color = 0x0d1117 }
   bg:align("center", 0, 0)
@@ -661,6 +673,11 @@ end
 
 function on_tick()
   local now = badge.sys.ms()
+  -- Lua paces its GC against the quota, so a 96 KB limit lets far more
+  -- garbage pile up than a 48 KB one before it collects - and what actually
+  -- runs out here is physical RAM, not the quota. One incremental step per
+  -- tick keeps the real footprint down at negligible cost.
+  badge.sys.gc_step()
 
   if st == ST_SEEK then
     if now >= next_beacon then
@@ -753,7 +770,7 @@ function on_button(button, kind)
       elseif menu_sel == 2 then
         is_radio = false
         rng = badge.sys.random(65536) % 65537
-        start_battle(badge.sys.random(#GEESE) + 1,
+        start_battle(badge.sys.random(NG) + 1,
           save.level > 2 and save.level - 1 or 1)
       else
         pick_sel = save.species
@@ -765,10 +782,10 @@ function on_button(button, kind)
 
   elseif st == ST_PICK then
     if button == B.UP or button == B.LEFT then
-      pick_sel = (pick_sel == 1) and #GEESE or pick_sel - 1
+      pick_sel = (pick_sel == 1) and NG or pick_sel - 1
       render_pick()
     elseif button == B.DOWN or button == B.RIGHT then
-      pick_sel = (pick_sel == #GEESE) and 1 or pick_sel + 1
+      pick_sel = (pick_sel == NG) and 1 or pick_sel + 1
       render_pick()
     elseif button == B.A then
       save.species = pick_sel
@@ -810,7 +827,7 @@ function on_button(button, kind)
         begin_seek()
       else
         rng = badge.sys.random(65536) % 65537
-        start_battle(badge.sys.random(#GEESE) + 1,
+        start_battle(badge.sys.random(NG) + 1,
           save.level > 2 and save.level - 1 or 1)
       end
     elseif button == B.B then
