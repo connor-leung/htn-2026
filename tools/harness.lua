@@ -3,32 +3,53 @@
 
 local M = {}
 
-local function mkwidget(kind, reg)
-  local w = { _kind = kind, _text = "", _hidden = false, _value = 0, _children = {} }
+local function mkwidget(kind, reg, owner, parent)
+  local w = { _kind = kind, _text = "", _hidden = false, _value = 0,
+              _children = {}, _parent = parent }
   if reg then reg[#reg + 1] = w end
+  if parent then parent._children[#parent._children + 1] = w end
+  -- The badge raises a clean "widget has been deleted" error on any use of a
+  -- deleted handle (including one whose parent was deleted). Model that, or
+  -- use-after-delete silently passes here and only shows up on hardware.
+  local function alive(self)
+    assert(not self._deleted,
+      "widget has been deleted (" .. tostring(self._kind) .. ")")
+  end
   local function self_ret(name)
-    w[name] = function(self, ...) return self end
+    w[name] = function(self, ...) alive(self) return self end
   end
   w.set_text = function(self, t)
+    alive(self)
     assert(type(t) == "string", "set_text needs a string, got " .. type(t))
     self._text = t; return self
   end
   w.set_value = function(self, v)
+    alive(self)
     assert(math.type(v) == "integer", "set_value needs an integer, got " .. tostring(v))
     self._value = v; return self
   end
-  w.hidden = function(self, b) self._hidden = b; return self end
+  w.hidden = function(self, b) alive(self) self._hidden = b; return self end
+  w.delete = function(self)
+    if self._deleted then return self end
+    self._deleted = true
+    owner.widgets = owner.widgets - 1
+    for _, child in ipairs(self._children) do child:delete() end
+    return self
+  end
   w.set_color = function(self, c)
+    alive(self)
     assert(math.type(c) == "integer", "set_color needs an integer colour")
     return self
   end
   w.align = function(self, where, dx, dy)
+    alive(self)
     assert(type(where) == "string", "align name must be a string")
     assert(math.type(dx) == "integer" and math.type(dy) == "integer",
       "align offsets must be integers, got " .. tostring(dx) .. "," .. tostring(dy))
     return self
   end
   w.set_size = function(self, a, b)
+    alive(self)
     assert(math.type(a) == "integer" and math.type(b) == "integer",
       "set_size needs integers")
     return self
@@ -62,7 +83,8 @@ function M.new(name, seed)
     return function(a, ...)
       b.widgets = b.widgets + 1
       assert(b.widgets <= 512, "exceeded the 512 native widget cap")
-      return mkwidget(kind, b.all)
+      local parent = type(a) == "table" and a.parent or a
+      return mkwidget(kind, b.all, b, parent)
     end
   end
   for _, k in ipairs({ "label", "box", "bar", "arc", "slider", "image", "line",
@@ -182,12 +204,12 @@ function M.new(name, seed)
 
   b.env = env
   b.badge = badge
-  b.root = mkwidget("root")
+  b.root = mkwidget("root", nil, b)
   -- screen(): every visible label text, like the badge console's uitree
   b.screen = function()
     local out = {}
     for _, w in ipairs(b.all) do
-      if w._text ~= "" then out[#out + 1] = w._text end
+      if not w._deleted and w._text ~= "" then out[#out + 1] = w._text end
     end
     return table.concat(out, " | ")
   end

@@ -21,6 +21,7 @@ local NG = 4
 local MV_NAME, MV_TY, MV_POW = {}, {}, {}
 local G_NAME, G_TY, G_HP, G_ATK, G_DEF, G_SPD = {}, {}, {}, {}, {}, {}
 local G_M = {}
+local data_loaded = false
 local function split(s, sep)
 local out = {}
 for field in string.gmatch(s, "([^" .. sep .. "]+)") do
@@ -29,6 +30,7 @@ end
 return out
 end
 local function load_data()
+if data_loaded then return end
 local recs = split(MOVE_DATA, ";")
 for i = 1, #recs do
 local f = split(recs[i], ",")
@@ -48,9 +50,12 @@ G_SPD[i] = tonumber(f[6])
 local b = (i - 1) * 4
 for k = 1, 4 do G_M[b + k] = tonumber(f[6 + k]) end
 end
+data_loaded = true
 end
 local ST_MENU, ST_PICK, ST_SEEK, ST_BATTLE, ST_RESULT = 1, 2, 3, 4, 5
 local ui = {}
+local app_bg
+local build_menu, build_pick, build_battle
 local st = ST_MENU
 local menu_sel = 1
 local pick_sel = 1
@@ -135,11 +140,6 @@ if frac > 0.5 then return 0, 200, 40 end
 if frac > 0.2 then return 255, 150, 0 end
 return 255, 40, 0
 end
-local function set_screen()
-ui.menu:hidden(st ~= ST_MENU)
-ui.pick:hidden(st ~= ST_PICK)
-ui.battle:hidden(st ~= ST_BATTLE and st ~= ST_RESULT and st ~= ST_SEEK)
-end
 local function render_menu()
 local items = { "Duel a nearby goose", "Solo practice", "Choose your goose" }
 for i = 1, 3 do
@@ -187,10 +187,10 @@ ui.me_hp:set_text(me.hp .. "/" .. me.max)
 ui.foe_hp:set_text(foe.hp .. "/" .. foe.max)
 end
 local function say(text)
-ui.log:set_text(text)
+if ui.log then ui.log:set_text(text) end
 end
 local function status(text)
-ui.status:set_text(text)
+if ui.status then ui.status:set_text(text) end
 end
 local function load_save()
 save.species = badge.store.get_int("gsp", 1)
@@ -227,6 +227,7 @@ end
 peer_id, peer_confirmed = nil, false
 end
 local function start_battle(foe_species, foe_level)
+if not ui.battle then build_battle() end
 me = make_fighter(save.species, save.level, 1)
 foe = make_fighter(foe_species, foe_level, 2)
 turn = 1
@@ -235,7 +236,6 @@ prev_turn, prev_move = nil, nil
 outcome = 0
 move_sel = 1
 st = ST_BATTLE
-set_screen()
 render_bars()
 render_moves()
 say("A wild duel begins!")
@@ -442,24 +442,20 @@ end
 end
 badge.led.show()
 end
-local function go_menu()
+local function go_menu(note)
 radio_stop()
 st = ST_MENU
 me, foe = nil, nil
 is_radio = false
-set_screen()
-render_menu()
+build_menu()
+if note then ui.menu_you:set_text(note) end
 end
 local function begin_seek()
 my_id = string.format("%04x", badge.sys.random(65536))
 peer_id, peer_confirmed, host, seed = nil, false, nil, nil
 if not radio_on then radio_on = badge.radio.enable() end
 if not radio_on then
-status("Radio unavailable - try Solo practice")
-st = ST_MENU
-set_screen()
-render_menu()
-say("Radio would not start. Reboot and retry.")
+go_menu("Radio unavailable - try Solo practice")
 return
 end
 badge.radio.on_recv(on_radio)
@@ -467,9 +463,9 @@ badge.sys.wake_lock(true)
 st = ST_SEEK
 last_rx = badge.sys.ms()
 next_beacon = 0
+build_battle()
 me = make_fighter(save.species, save.level, 1)
 foe = nil
-set_screen()
 ui.foe_name:set_text("Looking for a goose...")
 ui.foe_hp:set_text("")
 ui.foe_bar:set_value(0)
@@ -500,48 +496,81 @@ local p = badge.ui.box{ parent = parent, w = 320, h = 200, bg_opa = 0 }
 p:align("bottom_mid", 0, 0)
 return p
 end
-function on_enter(root)
+local function mem_log(tag)
+local s = badge.sys.stats()
+badge.sys.log(tag .. " lua=" .. s.lua_used .. "/" .. s.lua_limit ..
+" peak=" .. s.lua_peak .. " widgets=" .. s.widgets ..
+" free=" .. s.free_heap)
+end
+local function clear_panel()
+if ui.panel then ui.panel:delete() end
+ui = {}
+badge.sys.gc_step()
+badge.sys.gc_step()
+end
+local function ensure_data()
+if data_loaded then return end
 load_data()
+badge.sys.gc_step()
+badge.sys.gc_step()
+mem_log("data")
+end
+build_menu = function()
+clear_panel()
+ensure_data()
+ui.panel = panel(app_bg)
+ui.menu_item = {}
+for i = 1, 3 do
+ui.menu_item[i] = lbl(ui.panel, "", nil, false, "top_left", 40, 30 + (i - 1) * 26)
+end
+ui.menu_you = lbl(ui.panel, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
+lbl(ui.panel, "UP/DOWN choose  A select  L/R LEDs  HOME exit", 0x6b7280, true,
+"bottom_mid", 0, -10)
+render_menu()
+end
+build_pick = function()
+clear_panel()
+ensure_data()
+ui.panel = panel(app_bg)
+ui.pick_item = {}
+for i = 1, NG do
+ui.pick_item[i] = lbl(ui.panel, "", nil, false, "top_left", 28, 22 + (i - 1) * 24)
+end
+ui.pick_stat = lbl(ui.panel, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
+lbl(ui.panel, "Arrows choose   A confirm   B back", 0x6b7280, true,
+"bottom_mid", 0, -10)
+render_pick()
+end
+build_battle = function()
+clear_panel()
+ensure_data()
+ui.panel = panel(app_bg)
+ui.battle = ui.panel
+ui.foe_name = lbl(ui.panel, "", nil, false, "top_left", 12, 6)
+ui.foe_hp = lbl(ui.panel, "", nil, true, "top_right", -12, 8)
+ui.foe_bar = hp_bar(ui.panel, 26, 0xff5a3c)
+ui.me_name = lbl(ui.panel, "", nil, false, "top_left", 12, 44)
+ui.me_hp = lbl(ui.panel, "", nil, true, "top_right", -12, 46)
+ui.me_bar = hp_bar(ui.panel, 64, 0x35d07f)
+ui.log = lbl(ui.panel, "", 0xe5e7eb, true, "top_mid", 0, 84)
+ui.move = {}
+for i = 1, 4 do
+ui.move[i] = lbl(ui.panel, "", nil, true, "top_left",
+((i - 1) % 2 == 0) and 16 or 168, 106 + ((i - 1) // 2) * 22)
+end
+ui.status = lbl(ui.panel, "", 0x6b7280, true, "bottom_mid", 0, -10)
+mem_log("battle-ui")
+end
+function on_enter(root)
 load_save()
-badge.sys.gc_step()
-badge.sys.gc_step()
-local bg = badge.ui.box{ parent = root, w = 320, h = 240, bg_color = 0x0d1117 }
-bg:align("center", 0, 0)
-local title = badge.ui.label(bg, "GOOSE DUEL")
+app_bg = badge.ui.box{ parent = root, w = 320, h = 240, bg_color = 0x0d1117 }
+app_bg:align("center", 0, 0)
+local title = badge.ui.label(app_bg, "GOOSE DUEL")
 title:set_font_size("large")
 title:set_color(0xffc400)
 title:align("top_mid", 0, 8)
-ui.menu = panel(bg)
-ui.menu_item = {}
-for i = 1, 3 do
-ui.menu_item[i] = lbl(ui.menu, "", nil, false, "top_left", 40, 30 + (i - 1) * 26)
-end
-ui.menu_you = lbl(ui.menu, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
-lbl(ui.menu, "UP/DOWN choose  A select  L/R LEDs  HOME exit", 0x6b7280, true,
-"bottom_mid", 0, -10)
-ui.pick = panel(bg)
-ui.pick_item = {}
-for i = 1, 4 do
-ui.pick_item[i] = lbl(ui.pick, "", nil, false, "top_left", 28, 22 + (i - 1) * 24)
-end
-ui.pick_stat = lbl(ui.pick, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
-lbl(ui.pick, "Arrows choose   A confirm   B back", 0x6b7280, true,
-"bottom_mid", 0, -10)
-ui.battle = panel(bg)
-ui.foe_name = lbl(ui.battle, "", nil, false, "top_left", 12, 6)
-ui.foe_hp = lbl(ui.battle, "", nil, true, "top_right", -12, 8)
-ui.foe_bar = hp_bar(ui.battle, 26, 0xff5a3c)
-ui.me_name = lbl(ui.battle, "", nil, false, "top_left", 12, 44)
-ui.me_hp = lbl(ui.battle, "", nil, true, "top_right", -12, 46)
-ui.me_bar = hp_bar(ui.battle, 64, 0x35d07f)
-ui.log = lbl(ui.battle, "", 0xe5e7eb, true, "top_mid", 0, 84)
-ui.move = {}
-for i = 1, 4 do
-ui.move[i] = lbl(ui.battle, "", nil, true, "top_left",
-((i - 1) % 2 == 0) and 16 or 168, 106 + ((i - 1) // 2) * 22)
-end
-ui.status = lbl(ui.battle, "", 0x6b7280, true, "bottom_mid", 0, -10)
-go_menu()
+build_menu()
+mem_log("menu-ui")
 end
 function on_tick()
 local now = badge.sys.ms()
@@ -552,9 +581,7 @@ next_beacon = now + 500
 radio_send("GG1:H:" .. my_id .. ":" .. save.species .. ":" .. save.level)
 end
 if now - last_rx > 60000 then
-go_menu()
-say("No goose nearby. Radio off to save battery.")
-status("A to search again.")
+go_menu("No goose nearby. Radio off to save battery.")
 end
 elseif st == ST_BATTLE and is_radio then
 if host and not peer_confirmed and now >= next_beacon then
@@ -631,8 +658,7 @@ save.level > 2 and save.level - 1 or 1)
 else
 pick_sel = save.species
 st = ST_PICK
-set_screen()
-render_pick()
+build_pick()
 end
 end
 elseif st == ST_PICK then
