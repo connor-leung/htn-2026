@@ -31,7 +31,6 @@ sed -n '/^### `badge.led`/,/^### `badge.sensor`/p' README.md
 - `README.md` "Complete single-file apps" has seven full worked apps
   (counter/persistence, reaction game, tilt level, pocket light, LED tour,
   NFC viewer, radio hello). Adapt the nearest one rather than starting blank.
-- `templates/app-template.lua` is a minimal correct skeleton.
 
 ## 3. Write the app
 
