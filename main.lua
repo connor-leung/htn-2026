@@ -1,20 +1,16 @@
 -- Goose Duel - a Waterloo goose battler for the 2026 Hacker Badge.
 --
--- Controls
---   MENU    UP/DOWN pick, A select
---   PICK    arrows pick a goose, A confirm, B back
---   SEEK    waiting for a nearby badge, B cancel
---   BATTLE  arrows pick a move, A attack, B forfeit
---   RESULT  A rematch, B menu
---   HOME exits at any time and saves.
+-- MENU: UP/DOWN pick, A select.  PICK: arrows, A confirm, B back.
+-- SEEK: B cancels.  BATTLE: arrows pick a move, A attack, B forfeit.
+-- RESULT: A rematch, B menu.  HOME exits and saves.
 --
--- Two badges duel over the short-range radio. Neither badge ever sends HP or
--- damage: both send only the move they chose and compute the same result from
--- a shared seed, so dropped or duplicated frames cannot desync the battle.
+-- Two badges duel over the radio. Neither sends HP or damage: both send only
+-- the move they chose and compute the result from a shared seed, so dropped
+-- or duplicated frames cannot desync the battle.
 
--- ---------------------------------------------------------------- data ----
--- Stored as text and parsed once at startup: fewer table constructors in the
--- compiled chunk, which is the real memory ceiling on this badge.
+-- data
+-- Parsed once at startup: fewer table constructors in the compiled chunk,
+-- which is the real memory ceiling on this badge.
 
 -- name,type,power   (type 1=Honk 2=Peck 3=Flap)
 local MOVE_DATA =
@@ -61,7 +57,7 @@ local function load_data()
   end
 end
 
--- ---------------------------------------------------------------- state ---
+-- state
 local ST_MENU, ST_PICK, ST_SEEK, ST_BATTLE, ST_RESULT = 1, 2, 3, 4, 5
 
 local ui = {}
@@ -77,6 +73,9 @@ local me, foe            -- live combatants
 local is_radio = false   -- radio duel vs solo practice
 local turn = 1
 local my_move, foe_move
+-- Move played on the turn just resolved: a peer that missed it would wait
+-- forever, since we only ever retransmit the current turn.
+local prev_turn, prev_move
 local resolve_at = 0     -- solo: delay before showing the exchange
 local outcome = 0        -- 1 win, -1 loss, 0 undecided
 
@@ -100,7 +99,7 @@ end
 local led_at = 0
 local flash_until, flash_side, flash_rgb = 0, 0, nil
 
--- ------------------------------------------------------------- combat ----
+-- combat
 local function make_fighter(species, level, who)
   local g = GEESE[species]
   local l = level - 1
@@ -127,7 +126,7 @@ end
 
 local function damage(att, def, mv)
   local m = MOVES[mv]
-  local raw = (m.pow * att.atk) // (def.def * 3) + 2
+  local raw = (m.pow * att.atk) // (def.def * 8) + 2
   local e = effect(m.ty, def.ty)
   if e == 1 then
     raw = raw * 3 // 2
@@ -145,7 +144,7 @@ local function eff_word(e)
   return ""
 end
 
--- ------------------------------------------------------------- display ---
+-- display
 local function hp_rgb(frac)
   if frac > 0.5 then return 0, 200, 40 end
   if frac > 0.2 then return 255, 150, 0 end
@@ -191,7 +190,9 @@ local function render_moves()
     else
       local m = MOVES[me.moves[i]]
       local mark = (i == move_sel and not hide) and ">" or " "
-      lbl:set_text(mark .. m.name .. " " .. m.pow)
+      -- "Honk Blast H40": type initial + power, readable against the tags.
+      lbl:set_text(mark .. m.name .. " " ..
+        string.sub(TYPE_NAME[m.ty], 1, 1) .. m.pow)
       lbl:set_color((i == move_sel and not hide) and 0xffffff or 0x8a93a0)
     end
   end
@@ -199,9 +200,12 @@ end
 
 local function render_bars()
   if not me or not foe then return end
-  ui.foe_name:set_text(foe.name .. " Lv" .. foe.level)
+  -- Type on screen: move choice is worth 2x+ the win rate, so it must show.
+  ui.foe_name:set_text(foe.name .. " Lv" .. foe.level ..
+    " [" .. TYPE_NAME[foe.ty] .. "]")
   ui.foe_bar:set_value(foe.hp * 100 // foe.max)
-  ui.me_name:set_text(me.name .. " Lv" .. me.level)
+  ui.me_name:set_text(me.name .. " Lv" .. me.level ..
+    " [" .. TYPE_NAME[me.ty] .. "]")
   ui.me_bar:set_value(me.hp * 100 // me.max)
   ui.me_hp:set_text(me.hp .. "/" .. me.max)
   ui.foe_hp:set_text(foe.hp .. "/" .. foe.max)
@@ -215,7 +219,7 @@ local function status(text)
   ui.status:set_text(text)
 end
 
--- ------------------------------------------------------------- persist ---
+-- persist
 local function load_save()
   save.species = badge.store.get_int("gsp", 1)
   save.level = badge.store.get_int("glvl", 1)
@@ -236,14 +240,15 @@ local function flush_save()
   dirty = false
 end
 
--- --------------------------------------------------------------- radio ---
+-- radio
 local function radio_send(msg)
   if radio_on then badge.radio.send(msg) end
 end
 
 local function radio_stop()
   if radio_on then
-    radio_send("GG1:B:" .. my_id)
+    -- Only announce a bye if we are walking out of a duel that never finished.
+    if outcome == 0 then radio_send("GG1:B:" .. my_id) end
     badge.radio.on_recv(nil)
     badge.radio.disable()
     radio_on = false
@@ -256,6 +261,7 @@ local function start_battle(foe_species, foe_level)
   foe = make_fighter(foe_species, foe_level, 2)
   turn = 1
   my_move, foe_move = nil, nil
+  prev_turn, prev_move = nil, nil
   outcome = 0
   move_sel = 1
   st = ST_BATTLE
@@ -272,9 +278,8 @@ local function on_radio(mac, rssi, payload)
   local f = split(payload, ":")
   local kind, sender = f[2], f[3]
   if not kind or not sender or sender == my_id then return end
-  -- Any frame from our peer counts as contact, including the keepalive sent
-  -- while a player is still deciding. Without this, a long think reads as a
-  -- dropped link.
+  -- Any peer frame counts as contact, keepalives included: otherwise a long
+  -- think reads as a dropped link.
   if sender == peer_id then last_rx = badge.sys.ms() end
 
   if kind == "H" and st == ST_SEEK and not peer_id then
@@ -287,6 +292,7 @@ local function on_radio(mac, rssi, payload)
       seed = badge.sys.random(65536)
       rng = seed % 65537
       is_radio = true
+      next_beacon = 0   -- offer the pairing on the very next tick
       start_battle(tonumber(f[4]) or 1, tonumber(f[5]) or 1)
       status("Opponent found - your move")
     else
@@ -307,13 +313,17 @@ local function on_radio(mac, rssi, payload)
     return
   end
 
-  if kind == "M" and st == ST_BATTLE and sender == peer_id then
+  if kind == "M" and (st == ST_BATTLE or st == ST_RESULT) and
+     sender == peer_id then
     peer_confirmed = true
     last_rx = badge.sys.ms()
-    -- Only the turn we are actually waiting on; duplicates and stale frames
-    -- for an already-resolved turn are ignored.
-    if tonumber(f[4]) == turn and not foe_move then
+    local t = tonumber(f[4])
+    if t == turn and not foe_move and st == ST_BATTLE then
       foe_move = tonumber(f[5])
+    elseif t == prev_turn and prev_move then
+      -- The peer is a turn behind: it is still asking for the move we already
+      -- played. Answer from history so it can resolve and catch up.
+      radio_send("GG1:M:" .. my_id .. ":" .. prev_turn .. ":" .. prev_move)
     end
     return
   end
@@ -332,7 +342,7 @@ local function on_radio(mac, rssi, payload)
   end
 end
 
--- ---------------------------------------------------------------- turns --
+-- turns
 local function gain_xp(amount)
   save.xp = save.xp + amount
   while save.level < 50 and save.xp >= save.level * 20 do
@@ -357,10 +367,16 @@ local function finish(won)
     status("You lose. A rematch, B menu")
   end
   dirty = true
-  -- Deliberately not saved here: finish() can be reached from on_tick, whose
-  -- 250 ms budget is shared with the radio drain. The write happens on the
-  -- first press at the result screen (1,000 ms button budget) or on_exit.
+  -- Not saved here: finish() is reachable from on_tick's 250 ms budget. The
+  -- write happens on the first result-screen press, or on_exit.
+  -- No "bye" on a normal finish either: bye means "I quit" and the peer takes
+  -- it as a win, which would hand a win to someone who actually lost but had
+  -- not resolved the last turn. We answer their catch-up requests instead.
+end
+
+local function forfeit()
   if is_radio then radio_send("GG1:B:" .. my_id) end
+  finish(false)
 end
 
 local function strike(att, def, mv, label)
@@ -380,9 +396,8 @@ local function resolve()
   if me.spd ~= foe.spd then
     me_first = me.spd > foe.spd
   else
-    -- Both badges draw the same number here, so the tie-break must resolve to
-    -- a fixed player rather than to "me" - otherwise each badge would decide
-    -- it goes first and the two would resolve the turn in opposite orders.
+    -- Both badges draw the same number, so this must resolve to a fixed
+    -- player: "me" would make each badge think it goes first.
     me_first = (rnd(2) == 0) == (host ~= false)
   end
 
@@ -395,6 +410,7 @@ local function resolve()
   end
 
   render_bars()
+  prev_turn, prev_move = turn, my_move
   turn = turn + 1
   my_move, foe_move = nil, nil
 
@@ -409,8 +425,9 @@ local function resolve()
 end
 
 local function cpu_move()
-  -- Mostly the best matchup, sometimes not, so it is not perfectly readable.
-  if badge.sys.random(10) < 3 then return badge.sys.random(4) + 1 end
+  -- Half the time it plays the best matchup, half the time it just picks.
+  -- Always-optimal made practice mode punishing rather than encouraging.
+  if badge.sys.random(10) < 5 then return badge.sys.random(4) + 1 end
   local best, best_score = 1, -1
   for i = 1, 4 do
     local m = MOVES[foe.moves[i]]
@@ -481,7 +498,7 @@ local function draw_leds(now)
   badge.led.show()
 end
 
--- ------------------------------------------------------------ lifecycle --
+-- lifecycle
 local function go_menu()
   radio_stop()
   st = ST_MENU
@@ -523,8 +540,8 @@ local function begin_seek()
   status("Searching nearby. B cancels.")
 end
 
--- One helper for every label keeps the compiled chunk small: the widget setup
--- is otherwise the largest block of repeated constructors in the app.
+-- One label helper: the widget setup is otherwise the largest block of
+-- repeated constructors in the compiled chunk.
 local function lbl(parent, text, color, small, where, dx, dy)
   local l = badge.ui.label(parent, text)
   if small then l:set_font_size("small") end
@@ -712,7 +729,7 @@ function on_button(button, kind)
     -- Forfeit stays available after committing a move, so a vanished opponent
     -- does not trap you until the contact timeout fires.
     if button == B.B then
-      finish(false)
+      forfeit()
       return
     end
     if my_move then return end

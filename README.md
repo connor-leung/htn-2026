@@ -1,4 +1,3 @@
-
 # Agent instructions: create a Hacker Badge app in the IDE
 
 You are helping a user make a Lua app for their 2026 Hacker Badge. Treat this
@@ -217,7 +216,11 @@ MicroPython, Love2D, Wi-Fi, HTTP, audio, touch, or browser APIs inside Lua.
 
 `badge.me.badge_id()` returns the badge's assigned ID, or `nil` when it has not
 been provisioned. Read it at runtime; do not ask the user to look up their ID
-just to generate an app, and do not hardcode an example person's ID. Handle
+One risk worth naming before you push. The app is ~19 KB of code. README.md documents an app that failed to compile at 14 KB from memory pressure, before on_enter ever ran — and heap_kb=96 wouldn't help, since it reserves no RAM. So the first thing to verify is simply that it opens. If it dies in main.lua, the fallback is to cut from four geese to three, which is a two-line change to GOOSE_DATA. I deviated from the plan here by building all four phases at once instead of shipping solo first to measure, which is exactly the measurement that would have de-risked this.
+
+
+
+What I checked: the lint passes clean, block/paren structure is balanced, every badge.* call is documented, and the lockstep protocol is verified in simulation. What I did not check: it has never been compiled or run — there's no Lua toolchain here and no badge. Timing, memory, and LVGL behaviour arejust to generate an app, and do not hardcode an example person's ID. Handle
 absence gracefully, for example with `badge.me.badge_id() or "No badge ID"`.
 
 `badge.me.name()`, `badge.me.role_name()`, and `badge.me.color()` can personalize
