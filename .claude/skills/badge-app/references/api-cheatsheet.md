@@ -1,7 +1,7 @@
 # Badge API cheatsheet
 
 Condensed index of the whole Lua surface. Authoritative detail lives in
-`README.md` at the repo root — grep it by section heading for specifics.
+`badge-app-guide.md` at the repo root — grep it by section heading for specifics.
 
 ## Manifest (`manifest.cfg` / header block)
 

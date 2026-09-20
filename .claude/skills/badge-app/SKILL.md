@@ -5,8 +5,8 @@ description: Write, update, or review a Lua app for the Hack the North 2026 Hack
 
 # Badge app authoring
 
-The badge team's brief `README.md` at the repo root is the source of truth.
-This skill is the working procedure; pull exact details from `README.md`
+The badge team's brief `badge-app-guide.md` at the repo root is the source of truth.
+This skill is the working procedure; pull exact details from `badge-app-guide.md`
 as you need them rather than from memory.
 
 ## 1. Start from the user's idea
@@ -18,23 +18,23 @@ most one clarifying question about controls or scope.
 
 ## 2. Load only what the app needs
 
-`README.md` is ~1500 lines. Grep to the sections you need instead of reading it
+`badge-app-guide.md` is ~1500 lines. Grep to the sections you need instead of reading it
 whole:
 
 ```bash
-grep -n '^#\{2,4\} ' README.md          # section index
-sed -n '/^### `badge.led`/,/^### `badge.sensor`/p' README.md
+grep -n '^#\{2,4\} ' badge-app-guide.md          # section index
+sed -n '/^### `badge.led`/,/^### `badge.sensor`/p' badge-app-guide.md
 ```
 
 - `references/api-cheatsheet.md` in this skill is a condensed index of every
-  API, limit, and gotcha — read it first, then go to `README.md` for detail.
-- `README.md` "Complete single-file apps" has seven full worked apps
+  API, limit, and gotcha — read it first, then go to `badge-app-guide.md` for detail.
+- `badge-app-guide.md` "Complete single-file apps" has seven full worked apps
   (counter/persistence, reaction game, tilt level, pocket light, LED tour,
   NFC viewer, radio hello). Adapt the nearest one rather than starting blank.
 
 ## 3. Write the app
 
-Hard rules (details and rationale in `README.md`):
+Hard rules (details and rationale in `badge-app-guide.md`):
 
 - Global `on_enter(root)`, `on_tick()`, `on_button(button, kind)`, `on_exit()`.
   Never `local function on_enter`.

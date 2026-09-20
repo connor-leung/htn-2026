@@ -4,7 +4,7 @@ A Pokemon-style battler for the Hack the North 2026 Hacker Badge, themed on
 Waterloo's geese. Pick a goose, fight a CPU goose solo, or duel a friend's
 badge standing next to you.
 
-This is the current design. `README.md` is the badge team's platform brief and
+This is the current design. `badge-app-guide.md` is the badge team's platform brief and
 remains the authority on the hardware and API; where the two disagree, it wins.
 
 ## Goal and scope
@@ -134,7 +134,7 @@ XP is `10 + 2 * foe level` on a win, 3 on a loss; a level costs `20 * level`.
 
 State machine: `MENU -> PICK -> (SOLO | SEEK -> PAIRED) -> BATTLE -> RESULT`.
 
-- **MENU** UP/DOWN choose, A select, **L/R set LED brightness**
+- **MENU** UP/DOWN choose, A select
 - **PICK** arrows choose, A confirm, B back
 - **SEEK** B cancels
 - **BATTLE** arrows pick a move, A attack, B forfeit
@@ -161,12 +161,19 @@ full, then one `show()`.
 The six LEDs are the dominant draw, so every colour is scaled before reaching
 the strip.
 
-- Levels `{0, 60, 140, 255}` (Off/Low/Med/Full), **default Low**, persisted.
+- Every colour constant in the file is **pre-scaled to ~24%** (60/255).
+  Scaling on the way to the strip cost two prototypes and three multiplies per
+  LED per frame; pre-scaling the constants is free at runtime and, with memory
+  this tight, that mattered. To rebrighten, multiply every RGB literal by the
+  same factor.
 - **The strip blanks entirely after 20 s idle on a menu** and returns on any
   press. "Left in a pocket" was the expensive case.
-- `wake_lock` is **not** in the manifest. It is held only from the start of a
-  duel search until the radio stops, so the badge sleeps normally on menus and
-  in solo play. The 60 s search cap bounds the hold.
+- `wake_lock` is **not** in the manifest - and this was the battery bug. With
+  `wake_lock=1` set there, the badge never sleeps for the whole session,
+  menus included. It is now taken with `badge.sys.wake_lock(true)` at the start
+  of a duel search and released in `radio_stop()`, so the badge sleeps normally
+  on menus and in solo play. The 60 s search cap bounds the hold. **Removing it
+  from the manifest needs a Reboot to take effect.**
 - The radio gives up after 60 s with no peer and disables itself rather than
   advertising until flat.
 - LED refresh is 90 ms, not 50 ms: same visual smoothness, ~45% fewer writes.
@@ -178,7 +185,7 @@ not milliamps - treat it as "the dominant draw fell by two orders of magnitude".
 ## Persistence
 
 `badge.store` integers, cached in memory: `gsp` species, `glvl` level, `gxp` xp,
-`gwin` wins, `gloss` losses, `gled` LED level.
+`gwin` wins, `gloss` losses.
 
 Writes happen **only on the first press at the result screen and in `on_exit`** -
 never on a tick. `finish()` is reachable from `on_tick`, whose 250 ms budget is
@@ -188,41 +195,119 @@ screen saves too.
 
 ## Memory
 
-The hardest part of this project, and still the open risk.
+The hardest part of this project. The badge compiles the entire file before
+`on_enter` runs, holding both the source text and a compiled tree with debug
+info, and that compile is what fails.
 
-The badge compiles the entire file before `on_enter` runs, holding **both** the
-source text and a compiled tree with debug info:
+**The ceiling is now calibrated against the badge**, by measuring what each
+commit costs with `tools/mem_report.lua` (which `load()`s a chunk without
+running it and weighs the heap either side):
 
-```
-source text                 19,446 B
-compiled, with debug info   21,133 B   <- the badge holds this too
-compiled, stripped          15,554 B
-```
+| commit | retained | on the badge |
+| --- | --- | --- |
+| `a996e29` | **47.0 KB** | **boots at `heap_kb=48`** |
+| `43333a1` desync fixes | **48.0 KB** | the failure `fea9e5a` was written to fix |
+| `8e6bab5` battery work | 50.2 KB | fails |
+| `7f7e712` | 53.5 KB | fails, `peak 45,489 / limit 49,152` |
+| **current** | **47.2 KB** | to be tested |
 
-That is ~40 KB before transient parser allocations - which is why comment
-stripping alone was never decisive, and why `on_enter`-time optimisations
-(flattened data, gc_step) cannot help a failure in `main.lua`.
+The cliff sits in the 1 KB between 47.0 and 48.0. `tools/mem_report.lua`
+defaults to a 47.5 KB ceiling and fails the build above it.
 
-**What was done:**
+**Three things that were believed and are false:**
 
-- `tools/build.py` strips comments, blank lines and indentation from the shipped
-  bundle. `main.lua` stays readable; the badge gets 28% less source.
-- Data is ten flat arrays rather than 22 string-keyed tables. Measured at only
-  ~0.6 KB on the host - the right shape, not the fix.
-- One UI panel exists at a time, built on demand and deleted on transition:
-  **8 live widgets versus ~29**, stable over 200 transition cycles.
-- `badge.sys.gc_step()` once per tick and after parsing.
+- *Comment stripping helps.* It removes 30% of the source and **zero**
+  compiled bytes - measured identical to 16 bytes. It shrinks only the
+  transient buffer the lexer reads. It is still worth doing for that, but it
+  is not a memory fix.
+- *Cutting the app fixes the compile failure.* A 2.5 KB source-level cut moved
+  the badge by **46 bytes** of peak and 218 bytes of `used`. At that exchange
+  rate the two largest remaining feature cuts are worth ~50 bytes between them.
+- *`heap_kb=96` buys room.* It reserves no RAM; it only makes the GC lazier.
+  At 96 the collector idled until the *system* allocator ran out of a
+  contiguous block (peak 63,636 against largest 63,488 - a miss by 148 bytes).
+  At 48 the quota rejected the compile instead.
 
-**The counter-intuitive finding:** `heap_kb` does not ration the app, it sets
-how lazy the GC is. Raising it 48 -> 96 made things *worse* - `used` went
-40,572 -> 61,068, because Lua paces collection against the limit. With
-`free=76636` physical and Lua holding 61 KB, the allocator had ~15 KB left and
-failed. So the app ships **`heap_kb=48`** deliberately, to keep the collector
-aggressive.
+### The measurement that explains all of it
 
-If it still fails there with `used` near 40,000, the compile genuinely does not
-fit and the next step is cutting the app - three geese, simpler LED effects, no
-pick screen - which reduces compiled code and live data together.
+Removing multiplayer entirely - 25% of the program - and launching the result:
+
+| | `used` | `peak` | bytecode |
+| --- | --- | --- | --- |
+| `goose_duel` | 39,197 | 45,489 | 19,822 B |
+| `goose_solo` | **39,217** | 41,529 | 14,844 B |
+
+**`used` differs by 20 bytes.** `peak` tracks program size faithfully (-3,960
+for -4,978 bytes of bytecode); `used` does not move at all. So roughly 39.2 KB
+of the 48 KiB quota is consumed independently of the app, leaving under 10 KB
+for it. That is why a 2.5 KB cut moved `peak` by 46 bytes, and why deleting the
+entire radio stack moved `used` by 20: **the app was never what filled the
+quota.**
+
+The second tell: `goose_solo` peaked 7,623 bytes *below* the limit and still
+failed. The allocation being refused is a single block of at least 7.6 KB, and
+no amount of feature-trimming gets under that.
+
+The only lever that acts on a fixed floor is the quota itself, so the app ships
+**`heap_kb=96`**. At 96 the constraint stops being the quota and becomes
+physical contiguous RAM, where the 53.5 KB build missed by 148 bytes; today's
+builds peak lower and the largest block reads 65,536.
+
+**This is the fix, and it is confirmed on hardware.** `goose_solo` at
+`heap_kb=96` runs on USB *and* on battery - the first configuration in this
+project to do either. The whole memory effort before it, three rounds of
+cutting the app down, was aimed at the wrong variable.
+
+**And one trap worth its own line:** runtime manifest options (`api`,
+`heap_kb`, `wake_lock`, `home_button`, `confirm_home`) on an already-installed
+slug take effect only after a **Reboot**. Push and `reload` refresh the name
+and icon and nothing else. A `heap_kb=48` that had been in the repo for four
+commits had never once run on the badge, and every measurement taken in that
+window was taken under the old value.
+
+One more asymmetry in the current build's favour: it ships **17.5 KB of
+stripped source against the known-good version's 23.1 KB**, so on source bytes
+it is 5.5 KB lighter than a version that boots, while being within 0.2 KB of it
+on retained memory.
+
+## The single-badge build
+
+`apps/goose_solo/` is Goose Duel with the radio multiplayer removed - the
+pairing protocol, the retransmit/catch-up machinery, the seek screen and the
+wake lock. Everything else is the same game: the same four geese, twelve moves,
+type triangle, damage maths, levelling, save keys and LED effects.
+
+**It has multiplayer again, without a radio.** "Duel a friend" is a hot-seat
+duel: two players share one badge. Player 2 picks a goose, then each turn
+player 1 chooses a move, a hand-over screen blanks the move list, and player 2
+takes the badge and chooses theirs. Both moves resolve together, exactly as
+they would have over the air - the battle engine is unchanged, because the
+lockstep protocol only ever exchanged a move index anyway.
+
+A friend's duel does not touch the badge owner's record or XP, and player 2
+fights at player 1's level so the duel is about the matchup rather than who has
+played more. Verified over 60 simulated hot-seat duels: every one reaches a
+winner, the hand-over screen never leaks the other player's move list, and the
+stored win/loss record is untouched.
+
+| | retained | source shipped |
+| --- | --- | --- |
+| `goose_duel` (duelling) | 47.2 KB | 17.5 KB |
+| `goose_solo` (this) | **36.6 KB** | 14.2 KB |
+
+It ships `heap_kb=96` where the duelling build ships 48 - see Memory for why
+that is the only knob that moves this failure.
+
+It exists because the duelling build sits within 0.2 KB of a memory cliff
+measured between 47.0 and 48.0 KB, and that margin held on a freshly rebooted
+badge but not on a fragmented one - the app booted over USB after a reboot and
+failed the same day on battery. 34.2 KB is ~13 KB below the known-good
+version, which is margin rather than a coin flip.
+
+It is a separate slug (`goose_solo`, icon `G1`), so it installs alongside the
+duelling build rather than replacing it. `tools/test_solo.lua` drives it and
+asserts the radio is genuinely gone: nothing transmits, `badge.radio.enable`
+is never called, and the badge is never held awake.
 
 ## Repo layout and workflow
 
@@ -231,12 +316,15 @@ pick screen - which reduces compiled code and live data together.
 | `main.lua` | Source, commented and readable |
 | `manifest.cfg` | `slug=goose_duel`, `api=2`, `heap_kb=48`, text icon `GG` |
 | `goose_duel.lua` | **Build output** - the file to Import. Never hand-edit |
-| `tools/` | `build.py`, `harness.lua`, `test_battle.lua`, `test_power.lua` |
-| `README.md` | Badge team's platform brief |
+| `tools/` | `build.py`, `mem_report.lua`, `harness.lua`, `test_battle.lua`, `test_power.lua` |
+| `badge-app-guide.md` | Badge team's platform brief - the source of truth |
+| `README.md` | What this repo is; points at the guide |
 
 ```bash
 python3 tools/build.py      # regenerate goose_duel.lua - required after any edit
+lua tools/mem_report.lua    # compile cost against the 47.5 KB ceiling
 lua tools/test_battle.lua   # 300 solo battles + 120 duels
+lua tools/test_solo.lua     # the no-radio build in apps/goose_solo/
 lua tools/test_power.lua    # LED energy, idle blanking, wake lock, radio giveup
 luac -p main.lua            # syntax check
 python3 .claude/skills/badge-app/scripts/check_app.py goose_duel.lua
@@ -251,20 +339,37 @@ on device.
 
 ## What is verified, and what is not
 
+**Verified on hardware:** `goose_solo` at `heap_kb=96` launches and runs, on
+USB power and on battery. Nothing else in this document has been confirmed on a
+badge.
+
 **Verified in simulation:** 300 solo battles always terminate and save. 60/60
 duels on a clean link finish with one winner and mirrored HP. 60/60 duels at 35%
 frame loss with 20% duplicates reach a terminal state with no contradictory
 winners and no HP desync. No widget leak over 200 screen-transition cycles. Both
 the source and the shipped body compile under `luac`.
 
-**Not verified:** anything on hardware. The harness is a model of the badge, not
-the badge - it cannot reproduce ESP32 timing, LVGL allocation, flash latency, or
-real BLE. At time of writing the app has not yet booted on a badge.
+**Not verified:** a two-badge duel on real radios, and the duelling build's
+memory at `heap_kb=96`. The harness is a model of the badge, not the badge - it
+cannot reproduce ESP32 timing, LVGL allocation, flash latency, or real BLE.
 
 ## Open
 
-- **Memory.** `heap_kb=48` on a clean push is the next test. Fallback is cutting
-  the app down.
+- **Radio.** Badge-to-badge multiplayer is **not available to Lua apps** on
+  this hardware. `badge.radio.enable()` needs ~47 KB of system heap; on a badge
+  with a Lua app resident it either fails or, when it does allocate, leaves
+  2,968 bytes free - and no Lua app runs in 3 KB. The badge team confirmed it:
+  Share works because it is custom C. `badge.nfc` is reader-only and
+  `badge.contacts` is read-only, so neither is an alternative channel. See
+  `RADIO-ISSUE.md`. Hot-seat multiplayer is the answer, and it is shipped.
+- **Memory.** Solved for `goose_solo`: `heap_kb=96`, confirmed on hardware,
+  wired and on battery. `goose_duel` now carries the same setting but has not
+  been launched with it; its peak at 96 was the one that missed a contiguous
+  block by 148 bytes, back when the app was 6 KB larger than it is now. That is
+  the open test. The 47.0/48.0 host-side cliff recorded above turned out to be
+  a coincidence of two builds, not a real threshold - `used` is flat across a
+  25% change in program size - so treat `tools/mem_report.lua` as a regression
+  guard, not as a predictor of whether the badge will launch an app.
 - **Push reliability.** Repeated transfer stalls - including one on a 5,304-byte
   `icon.bin`, which rules out file size - leave padded, corrupt files and produce
   spurious syntax errors. A push is only trustworthy with no `[push error]` line.

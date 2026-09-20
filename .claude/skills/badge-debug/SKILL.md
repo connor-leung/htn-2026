@@ -47,11 +47,11 @@ provisioning credentials.
 
 ## 4. Match the fix to the symptom
 
-`README.md` at the repo root ends with a symptom -> fix table covering every
+`badge-app-guide.md` at the repo root ends with a symptom -> fix table covering every
 documented failure. Read it before answering:
 
 ```bash
-sed -n '/^### Match the fix to the failure/,$p' README.md
+sed -n '/^### Match the fix to the failure/,$p' badge-app-guide.md
 ```
 
 The cases that get misdiagnosed most often:
