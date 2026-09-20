@@ -83,8 +83,14 @@ function M.new(name, seed)
     return function(a, ...)
       b.widgets = b.widgets + 1
       assert(b.widgets <= 512, "exceeded the 512 native widget cap")
-      local parent = type(a) == "table" and a.parent or a
-      return mkwidget(kind, b.all, b, parent)
+      local tbl = type(a) == "table" and a.parent ~= nil
+      local parent = tbl and a.parent or a
+      local w = mkwidget(kind, b.all, b, parent)
+      -- badge.ui.label(parent, "hello") displays that text on the badge, so
+      -- the mock has to record it or screen() lies about what is on screen.
+      local text = tbl and a.text or (...)
+      if type(text) == "string" then w._text = text end
+      return w
     end
   end
   for _, k in ipairs({ "label", "box", "bar", "arc", "slider", "image", "line",
@@ -149,7 +155,13 @@ function M.new(name, seed)
   }
 
   badge.radio = {
-    enable = function() b.radio_up = true; return true end,
+    -- Set b.radio_fails to model a badge where NimBLE cannot get its memory:
+    -- "nimble host init failed" is a real, observed outcome, not a corner case.
+    enable = function()
+      if b.radio_fails then return false end
+      b.radio_up = true
+      return true
+    end,
     disable = function() b.radio_up = false end,
     send = function(payload)
       assert(type(payload) == "string", "radio payload must be a string")
@@ -196,10 +208,13 @@ function M.new(name, seed)
   }
   env._G = env
 
-  local f = assert(io.open("main.lua", "r"))
+  -- Which app to drive. Defaults to the one at the repo root; set M.source
+  -- (or BADGE_APP=) to run the same tests against apps/<slug>/main.lua.
+  local path = M.source or os.getenv("BADGE_APP") or "main.lua"
+  local f = assert(io.open(path, "r"))
   local src = f:read("a")
   f:close()
-  local chunk = assert(load(src, "main.lua", "t", env))
+  local chunk = assert(load(src, path, "t", env))
   chunk()
 
   b.env = env

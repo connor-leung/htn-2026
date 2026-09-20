@@ -7,20 +7,20 @@ local function check(c, m) if not c then fails = fails + 1; print("  FAIL: " .. 
 local function tick(b, ms) for _ = 1, ms // 20 do b.now = b.now + 20; b.env.on_tick() end end
 local function press(b, n) b.env.on_button(b.badge.input.BUTTON[n], b.badge.input.KIND.PRESSED) end
 
--- LED energy sitting on the menu for 15 s at each level
+-- LED energy sitting on the menu. The brightness setting was removed to save
+-- compiled memory, so there is one level; what is checked is that the fixed
+-- scale is actually applied, not that a menu can change it.
 print("== LED energy, 15 s idle on the menu ==")
-local base
-for lvl = 1, 4 do
-  local b = H.new("C", 3)
-  b.env.on_enter(b.root)
-  for _ = 1, (lvl - 2) % 4 do press(b, "RIGHT") end   -- level 2 is the default
-  b.led_energy = 0
-  tick(b, 15000)
-  local e = b.led_energy or 0
-  if lvl == 4 then base = e end
-  print(string.format("  level %d (%-4s): energy %10d", lvl,
-    ({"Off","Low","Med","Full"})[lvl], e))
-end
+local b0 = H.new("C", 3)
+b0.env.on_enter(b0.root)
+b0.led_energy = 0
+tick(b0, 15000)
+local scaled = b0.led_energy
+print(string.format("  15 s of menu breathing: energy %d", scaled))
+check(scaled > 0, "the strip animates on the menu")
+-- Unscaled, six LEDs breathing to full for 15 s would be an order of
+-- magnitude more than this. The exact figure tracks LED_SCALE / 255.
+check(scaled < 15000000 // 255 * 60, "colours are scaled down before the strip")
 
 print("\n== idle blanking ==")
 local b = H.new("C", 3)

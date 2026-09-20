@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build goose_duel.lua (the file you Import) from manifest.cfg + main.lua.
+"""Build the single file you Import, from manifest.cfg + main.lua.
 
 Comments, blank lines and indentation are stripped from the shipped copy. The badge
 compiles the whole file before on_enter runs, and that compile is what hits
@@ -8,16 +8,22 @@ worth removing. main.lua itself stays commented and readable.
 
 Strings are respected: a "--" inside a string literal is not a comment.
 
-    python3 tools/build.py            # writes goose_duel.lua
-    python3 tools/build.py --check    # report sizes only
+    python3 tools/build.py                    # the app at the repo root
+    python3 tools/build.py apps/goose_solo    # any app directory
+    python3 tools/build.py --check            # report sizes only
+
+The output file is named after the manifest's slug, so each app directory
+builds its own bundle next to its sources.
 """
 
+import os
 import re
+import shutil
+import subprocess
 import sys
 
 MAIN = "main.lua"
 MANIFEST = "manifest.cfg"
-OUT = "goose_duel.lua"
 
 
 def strip_line(line):
@@ -44,11 +50,24 @@ def strip_line(line):
     return out if out.strip() else None
 
 
+def slug_of(manifest, app_dir):
+    """The manifest's slug names the bundle, so each app builds its own."""
+    for line in manifest.splitlines():
+        if line.startswith("slug="):
+            return line.split("=", 1)[1].strip()
+    raise SystemExit(f"build.py: no slug= in {os.path.join(app_dir, MANIFEST)}")
+
+
 def main():
-    with open(MAIN, encoding="utf-8") as f:
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    app_dir = args[0] if args else "."
+
+    with open(os.path.join(app_dir, MAIN), encoding="utf-8") as f:
         src = f.read()
-    with open(MANIFEST, encoding="utf-8") as f:
+    with open(os.path.join(app_dir, MANIFEST), encoding="utf-8") as f:
         manifest = f.read().rstrip("\n")
+
+    out = os.path.join(app_dir, slug_of(manifest, app_dir) + ".lua")
 
     # A long-bracket string would make indentation significant; this app has
     # none, and silently reflowing one would corrupt it.
@@ -67,12 +86,29 @@ def main():
     bundle = "--[==[badge-app\n" + manifest + "\n]==]\n\n" + body
 
     if "--check" not in sys.argv:
-        with open(OUT, "w", encoding="utf-8") as f:
+        with open(out, "w", encoding="utf-8") as f:
             f.write(bundle)
 
-    print(f"{MAIN}: {len(src.encode()):,} B  ->  shipped body {len(body.encode()):,} B "
+    print(f"{os.path.join(app_dir, MAIN)}: {len(src.encode()):,} B  ->  "
+          f"shipped body {len(body.encode()):,} B "
           f"({100 - 100 * len(body.encode()) // len(src.encode())}% smaller)")
-    print(f"{OUT}: {len(bundle.encode()):,} B")
+    print(f"{out}: {len(bundle.encode()):,} B")
+
+    # Source bytes are not the ceiling: stripping comments removes 28% of the
+    # file and zero compiled bytes. Print what the badge actually has to hold.
+    # Skipped under --check, where OUT on disk is the previous build.
+    if "--check" not in sys.argv:
+        report(out)
+
+
+def report(out):
+    """Print the compile-memory line for the shipped bundle, if lua is here."""
+    lua = shutil.which("lua")
+    if lua is None:
+        print("(install lua to see the compile-memory line: brew install lua)")
+        return
+    sys.stdout.flush()   # the subprocess writes straight to the terminal
+    subprocess.run([lua, "tools/mem_report.lua", out])
 
 
 if __name__ == "__main__":
