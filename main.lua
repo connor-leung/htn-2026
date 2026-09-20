@@ -1,16 +1,20 @@
 -- Goose Duel - a Waterloo goose battler for the 2026 Hacker Badge.
 --
--- MENU: UP/DOWN pick, A select.  PICK: arrows, A confirm, B back.
--- SEEK: B cancels.  BATTLE: arrows pick a move, A attack, B forfeit.
--- RESULT: A rematch, B menu.  HOME exits and saves.
+-- Controls
+--   MENU    UP/DOWN pick, A select
+--   PICK    arrows pick a goose, A confirm, B back
+--   SEEK    waiting for a nearby badge, B cancel
+--   BATTLE  arrows pick a move, A attack, B forfeit
+--   RESULT  A rematch, B menu
+--   HOME exits at any time and saves.
 --
--- Two badges duel over the radio. Neither sends HP or damage: both send only
--- the move they chose and compute the result from a shared seed, so dropped
--- or duplicated frames cannot desync the battle.
+-- Two badges duel over the short-range radio. Neither badge ever sends HP or
+-- damage: both send only the move they chose and compute the same result from
+-- a shared seed, so dropped or duplicated frames cannot desync the battle.
 
--- data
--- Parsed once at startup: fewer table constructors in the compiled chunk,
--- which is the real memory ceiling on this badge.
+-- ---------------------------------------------------------------- data ----
+-- Stored as text and parsed once at startup: fewer table constructors in the
+-- compiled chunk, which is the real memory ceiling on this badge.
 
 -- name,type,power   (type 1=Honk 2=Peck 3=Flap)
 local MOVE_DATA =
@@ -26,16 +30,15 @@ local GOOSE_DATA =
   "Alpha Gander,1,50,18,9,13,11,2,12,7"
 
 local TYPE_NAME = { "Honk", "Peck", "Flap" }
-local TYPE_RGB = { { 255, 80, 200 }, { 255, 150, 0 }, { 0, 190, 255 } }
+-- Type colours, already scaled to ~24% (60/255). The six LEDs are the app's
+-- largest battery draw, and pre-scaling every colour constant costs nothing at
+-- runtime, unlike scaling on the way to the strip. To rebrighten the app,
+-- multiply every RGB literal in this file - here, in led_column, and in
+-- draw_leds - by the same factor.
+local TYPE_RGB = { { 60, 19, 47 }, { 60, 35, 0 }, { 0, 45, 60 } }
 
--- Flat parallel arrays, not tables of records. 22 string-keyed hash tables
--- cost far more retained memory than 10 sequence-only arrays, and retained
--- memory is what the system allocator runs out of on this badge.
-local NG = 4                       -- number of geese
-local MV_NAME, MV_TY, MV_POW = {}, {}, {}
-local G_NAME, G_TY, G_HP, G_ATK, G_DEF, G_SPD = {}, {}, {}, {}, {}, {}
-local G_M = {}                     -- moves, flat: (species - 1) * 4 + slot
-local data_loaded = false
+local MOVES = {}
+local GEESE = {}
 
 local function split(s, sep)
   local out = {}
@@ -46,35 +49,27 @@ local function split(s, sep)
 end
 
 local function load_data()
-  if data_loaded then return end
   local recs = split(MOVE_DATA, ";")
   for i = 1, #recs do
     local f = split(recs[i], ",")
-    MV_NAME[i] = f[1]
-    MV_TY[i] = tonumber(f[2])
-    MV_POW[i] = tonumber(f[3])
+    MOVES[i] = { name = f[1], ty = tonumber(f[2]), pow = tonumber(f[3]) }
   end
   recs = split(GOOSE_DATA, ";")
   for i = 1, #recs do
     local f = split(recs[i], ",")
-    G_NAME[i] = f[1]
-    G_TY[i] = tonumber(f[2])
-    G_HP[i] = tonumber(f[3])
-    G_ATK[i] = tonumber(f[4])
-    G_DEF[i] = tonumber(f[5])
-    G_SPD[i] = tonumber(f[6])
-    local b = (i - 1) * 4
-    for k = 1, 4 do G_M[b + k] = tonumber(f[6 + k]) end
+    GEESE[i] = {
+      name = f[1], ty = tonumber(f[2]),
+      hp = tonumber(f[3]), atk = tonumber(f[4]),
+      def = tonumber(f[5]), spd = tonumber(f[6]),
+      moves = { tonumber(f[7]), tonumber(f[8]), tonumber(f[9]), tonumber(f[10]) },
+    }
   end
-  data_loaded = true
 end
 
--- state
+-- ---------------------------------------------------------------- state ---
 local ST_MENU, ST_PICK, ST_SEEK, ST_BATTLE, ST_RESULT = 1, 2, 3, 4, 5
 
 local ui = {}
-local app_bg
-local build_menu, build_pick, build_battle
 local st = ST_MENU
 local menu_sel = 1
 local pick_sel = 1
@@ -87,8 +82,8 @@ local me, foe            -- live combatants
 local is_radio = false   -- radio duel vs solo practice
 local turn = 1
 local my_move, foe_move
--- Move played on the turn just resolved: a peer that missed it would wait
--- forever, since we only ever retransmit the current turn.
+-- The move played on the turn just resolved. A peer that missed it would wait
+-- forever otherwise, since only the current turn is ever retransmitted.
 local prev_turn, prev_move
 local resolve_at = 0     -- solo: delay before showing the exchange
 local outcome = 0        -- 1 win, -1 loss, 0 undecided
@@ -109,42 +104,23 @@ local function rnd(n)
   return rng % n
 end
 
--- LED animation. The six LEDs are the largest battery draw in the app, so
--- every colour is scaled by the chosen level before it reaches the strip, and
--- the strip is blanked entirely when nothing is happening.
-local LED_STEP = { 0, 60, 140, 255 }
-local LED_NAME = { "Off", "Low", "Med", "Full" }
-local led_level = 2
+-- LED animation
 local led_at = 0
-local led_scale = 255
 local led_blank = false
 local last_input = 0
 local flash_until, flash_side, flash_rgb = 0, 0, nil
 
-local function ledset(i, r, g, b)
-  badge.led.set(i, r * led_scale // 255, g * led_scale // 255,
-    b * led_scale // 255)
-end
-
-local function ledall(r, g, b)
-  for i = 1, 6 do ledset(i, r, g, b) end
-end
-
--- combat
+-- ------------------------------------------------------------- combat ----
 local function make_fighter(species, level, who)
+  local g = GEESE[species]
   local l = level - 1
-  local max = G_HP[species] + l * 4
+  local max = g.hp + l * 4
   return {
-    sp = species, level = level, name = G_NAME[species], ty = G_TY[species],
+    sp = species, level = level, name = g.name, ty = g.ty,
     hp = max, max = max,
-    atk = G_ATK[species] + l * 2, def = G_DEF[species] + l * 2,
-    spd = G_SPD[species] + l, who = who,
+    atk = g.atk + l * 2, def = g.def + l * 2, spd = g.spd + l,
+    moves = g.moves, who = who,
   }
-end
-
--- move id for slot `i` of a fighter
-local function mv_of(f, i)
-  return G_M[(f.sp - 1) * 4 + i]
 end
 
 -- 1 = super effective, -1 = resisted, 0 = neutral. Honk > Flap > Peck > Honk.
@@ -160,8 +136,11 @@ local function effect(atk_ty, def_ty)
 end
 
 local function damage(att, def, mv)
-  local raw = (MV_POW[mv] * att.atk) // (def.def * 8) + 2
-  local e = effect(MV_TY[mv], def.ty)
+  local m = MOVES[mv]
+  -- Divisor swept 3..9 over 300 battles per value: 3 ends duels in 2.8 rounds,
+  -- 8 gives 6.3 (range 4-8), which is the target. Costs nothing to change.
+  local raw = (m.pow * att.atk) // (def.def * 8) + 2
+  local e = effect(m.ty, def.ty)
   if e == 1 then
     raw = raw * 3 // 2
   elseif e == -1 then
@@ -172,17 +151,11 @@ local function damage(att, def, mv)
   return raw, e
 end
 
-local function eff_word(e)
-  if e == 1 then return " (strong!)" end
-  if e == -1 then return " (weak)" end
-  return ""
-end
-
--- display
-local function hp_rgb(frac)
-  if frac > 0.5 then return 0, 200, 40 end
-  if frac > 0.2 then return 255, 150, 0 end
-  return 255, 40, 0
+-- ------------------------------------------------------------- display ---
+local function set_screen()
+  ui.menu:hidden(st ~= ST_MENU)
+  ui.pick:hidden(st ~= ST_PICK)
+  ui.battle:hidden(st ~= ST_BATTLE and st ~= ST_RESULT and st ~= ST_SEEK)
 end
 
 local function render_menu()
@@ -192,19 +165,21 @@ local function render_menu()
     ui.menu_item[i]:set_text(mark .. items[i])
     ui.menu_item[i]:set_color(i == menu_sel and 0xffffff or 0x8a93a0)
   end
-  ui.menu_you:set_text(G_NAME[save.species] .. "  Lv" .. save.level ..
-    "  W" .. save.wins .. " L" .. save.losses ..
-    "   LEDs " .. LED_NAME[led_level])
+  local g = GEESE[save.species]
+  ui.menu_you:set_text(g.name .. "  Lv" .. save.level ..
+    "  W" .. save.wins .. " L" .. save.losses)
 end
 
 local function render_pick()
   for i = 1, 4 do
+    local g = GEESE[i]
     local mark = (i == pick_sel) and "> " or "  "
-    ui.pick_item[i]:set_text(mark .. G_NAME[i] .. " (" .. TYPE_NAME[G_TY[i]] .. ")")
+    ui.pick_item[i]:set_text(mark .. g.name .. " (" .. TYPE_NAME[g.ty] .. ")")
     ui.pick_item[i]:set_color(i == pick_sel and 0xffffff or 0x8a93a0)
   end
-  ui.pick_stat:set_text("HP " .. G_HP[pick_sel] .. "  ATK " .. G_ATK[pick_sel] ..
-    "  DEF " .. G_DEF[pick_sel] .. "  SPD " .. G_SPD[pick_sel])
+  local g = GEESE[pick_sel]
+  ui.pick_stat:set_text("HP " .. g.hp .. "  ATK " .. g.atk ..
+    "  DEF " .. g.def .. "  SPD " .. g.spd)
 end
 
 local function render_moves()
@@ -214,11 +189,9 @@ local function render_moves()
     if not me then
       lbl:set_text("")
     else
-      local mv = mv_of(me, i)
+      local m = MOVES[me.moves[i]]
       local mark = (i == move_sel and not hide) and ">" or " "
-      -- "Honk Blast H40": type initial + power, readable against the tags.
-      lbl:set_text(mark .. MV_NAME[mv] .. " " ..
-        string.sub(TYPE_NAME[MV_TY[mv]], 1, 1) .. MV_POW[mv])
+      lbl:set_text(mark .. m.name .. " " .. m.pow)
       lbl:set_color((i == move_sel and not hide) and 0xffffff or 0x8a93a0)
     end
   end
@@ -226,38 +199,30 @@ end
 
 local function render_bars()
   if not me or not foe then return end
-  -- Type on screen: move choice is worth 2x+ the win rate, so it must show.
-  ui.foe_name:set_text(foe.name .. " Lv" .. foe.level ..
-    " [" .. TYPE_NAME[foe.ty] .. "]")
+  ui.foe_name:set_text(foe.name .. " Lv" .. foe.level)
   ui.foe_bar:set_value(foe.hp * 100 // foe.max)
-  ui.me_name:set_text(me.name .. " Lv" .. me.level ..
-    " [" .. TYPE_NAME[me.ty] .. "]")
+  ui.me_name:set_text(me.name .. " Lv" .. me.level)
   ui.me_bar:set_value(me.hp * 100 // me.max)
   ui.me_hp:set_text(me.hp .. "/" .. me.max)
   ui.foe_hp:set_text(foe.hp .. "/" .. foe.max)
 end
 
--- These write to battle-panel widgets. Every current caller runs with that
--- panel up, but guard anyway: a call from the menu would otherwise be a crash
--- rather than a no-op.
 local function say(text)
-  if ui.log then ui.log:set_text(text) end
+  ui.log:set_text(text)
 end
 
 local function status(text)
-  if ui.status then ui.status:set_text(text) end
+  ui.status:set_text(text)
 end
 
--- persist
+-- ------------------------------------------------------------- persist ---
 local function load_save()
   save.species = badge.store.get_int("gsp", 1)
   save.level = badge.store.get_int("glvl", 1)
   save.xp = badge.store.get_int("gxp", 0)
   save.wins = badge.store.get_int("gwin", 0)
   save.losses = badge.store.get_int("gloss", 0)
-  led_level = badge.store.get_int("gled", 2)
-  if led_level < 1 or led_level > 4 then led_level = 2 end
-  if save.species < 1 or save.species > NG then save.species = 1 end
+  if save.species < 1 or save.species > #GEESE then save.species = 1 end
   if save.level < 1 then save.level = 1 end
 end
 
@@ -268,18 +233,18 @@ local function flush_save()
   badge.store.set_int("gxp", save.xp)
   badge.store.set_int("gwin", save.wins)
   badge.store.set_int("gloss", save.losses)
-  badge.store.set_int("gled", led_level)
   dirty = false
 end
 
--- radio
+-- --------------------------------------------------------------- radio ---
 local function radio_send(msg)
   if radio_on then badge.radio.send(msg) end
 end
 
 local function radio_stop()
-  -- Releasing the wake lock is the single biggest battery win: the badge can
-  -- sleep normally everywhere except inside a live duel.
+  -- Releasing the wake lock is the single biggest battery win: with it held
+  -- from the manifest the badge never slept, menus included. Now it is held
+  -- only from the start of a duel search until the radio stops.
   badge.sys.wake_lock(false)
   if radio_on then
     -- Only announce a bye if we are walking out of a duel that never finished.
@@ -292,7 +257,6 @@ local function radio_stop()
 end
 
 local function start_battle(foe_species, foe_level)
-  if not ui.battle then build_battle() end
   me = make_fighter(save.species, save.level, 1)
   foe = make_fighter(foe_species, foe_level, 2)
   turn = 1
@@ -301,6 +265,7 @@ local function start_battle(foe_species, foe_level)
   outcome = 0
   move_sel = 1
   st = ST_BATTLE
+  set_screen()
   render_bars()
   render_moves()
   say("A wild duel begins!")
@@ -313,8 +278,9 @@ local function on_radio(mac, rssi, payload)
   local f = split(payload, ":")
   local kind, sender = f[2], f[3]
   if not kind or not sender or sender == my_id then return end
-  -- Any peer frame counts as contact, keepalives included: otherwise a long
-  -- think reads as a dropped link.
+  -- Any frame from our peer counts as contact, including the keepalive sent
+  -- while a player is still deciding. Without this, a long think reads as a
+  -- dropped link.
   if sender == peer_id then last_rx = badge.sys.ms() end
 
   if kind == "H" and st == ST_SEEK and not peer_id then
@@ -327,7 +293,6 @@ local function on_radio(mac, rssi, payload)
       seed = badge.sys.random(65536)
       rng = seed % 65537
       is_radio = true
-      next_beacon = 0   -- offer the pairing on the very next tick
       start_battle(tonumber(f[4]) or 1, tonumber(f[5]) or 1)
       status("Opponent found - your move")
     else
@@ -357,7 +322,8 @@ local function on_radio(mac, rssi, payload)
       foe_move = tonumber(f[5])
     elseif t == prev_turn and prev_move then
       -- The peer is a turn behind: it is still asking for the move we already
-      -- played. Answer from history so it can resolve and catch up.
+      -- played. Answer from history so it can resolve and catch up. Without
+      -- this, whoever paired first races ahead and the other badge hangs.
       radio_send("GG1:M:" .. my_id .. ":" .. prev_turn .. ":" .. prev_move)
     end
     return
@@ -377,7 +343,7 @@ local function on_radio(mac, rssi, payload)
   end
 end
 
--- turns
+-- ---------------------------------------------------------------- turns --
 local function gain_xp(amount)
   save.xp = save.xp + amount
   while save.level < 50 and save.xp >= save.level * 20 do
@@ -402,16 +368,12 @@ local function finish(won)
     status("You lose. A rematch, B menu")
   end
   dirty = true
-  -- Not saved here: finish() is reachable from on_tick's 250 ms budget. The
-  -- write happens on the first result-screen press, or on_exit.
+  -- Deliberately not saved here: finish() can be reached from on_tick, whose
+  -- 250 ms budget is shared with the radio drain. The write happens on the
+  -- first press at the result screen (1,000 ms button budget) or on_exit.
   -- No "bye" on a normal finish either: bye means "I quit" and the peer takes
   -- it as a win, which would hand a win to someone who actually lost but had
-  -- not resolved the last turn. We answer their catch-up requests instead.
-end
-
-local function forfeit()
-  if is_radio then radio_send("GG1:B:" .. my_id) end
-  finish(false)
+  -- not yet resolved the final turn. We answer their catch-up requests instead.
 end
 
 local function strike(att, def, mv, label)
@@ -421,18 +383,20 @@ local function strike(att, def, mv, label)
   if def.hp < 0 then def.hp = 0 end
   flash_until = badge.sys.ms() + 260
   flash_side = def.who
-  flash_rgb = TYPE_RGB[MV_TY[mv]]
-  say(label .. " " .. MV_NAME[mv] .. " for " .. dmg .. eff_word(e))
+  flash_rgb = TYPE_RGB[MOVES[mv].ty]
+  say(label .. " " .. MOVES[mv].name .. " for " .. dmg ..
+    ((e == 1) and " (strong!)" or (e == -1) and " (weak)" or ""))
 end
 
 local function resolve()
-  local mine, theirs = mv_of(me, my_move), mv_of(foe, foe_move)
+  local mine, theirs = me.moves[my_move], foe.moves[foe_move]
   local me_first
   if me.spd ~= foe.spd then
     me_first = me.spd > foe.spd
   else
-    -- Both badges draw the same number, so this must resolve to a fixed
-    -- player: "me" would make each badge think it goes first.
+    -- Both badges draw the same number here, so the tie-break must resolve to
+    -- a fixed player rather than to "me" - otherwise each badge would decide
+    -- it goes first and the two would resolve the turn in opposite orders.
     me_first = (rnd(2) == 0) == (host ~= false)
   end
 
@@ -460,24 +424,28 @@ local function resolve()
 end
 
 local function cpu_move()
-  -- Half the time it plays the best matchup, half the time it just picks.
-  -- Always-optimal made practice mode punishing rather than encouraging.
-  if badge.sys.random(10) < 5 then return badge.sys.random(4) + 1 end
+  -- Mostly the best matchup, sometimes not, so it is not perfectly readable.
+  if badge.sys.random(10) < 3 then return badge.sys.random(4) + 1 end
   local best, best_score = 1, -1
   for i = 1, 4 do
-    local mv = mv_of(foe, i)
-    local score = MV_POW[mv] + effect(MV_TY[mv], me.ty) * 20
+    local m = MOVES[foe.moves[i]]
+    local score = m.pow + effect(m.ty, me.ty) * 20
     if score > best_score then best, best_score = i, score end
   end
   return best
 end
 
 -- ----------------------------------------------------------------- LEDs --
-local function led_column(base, frac, r, g, b)
+-- An HP column: how many of the three LEDs are lit, and in what colour, both
+-- follow from the same fraction.
+local function led_column(base, frac)
+  local r, g, b = 60, 9, 0
+  if frac > 0.5 then r, g, b = 0, 47, 9
+  elseif frac > 0.2 then r, g, b = 60, 35, 0 end
   local lit = frac * 3
   for i = 1, 3 do
     if lit >= i - 0.34 then
-      ledset(base[i], r, g, b)
+      badge.led.set(base[i], r, g, b)
     end
   end
 end
@@ -492,13 +460,9 @@ local function draw_leds(now)
   if now - led_at < 90 then return end
   led_at = now
 
-  led_scale = LED_STEP[led_level]
   -- Idle on a menu is the common "left in a pocket" case: blank the strip
   -- rather than breathing at it for hours.
   if (st == ST_MENU or st == ST_PICK) and now - last_input > 20000 then
-    led_scale = 0
-  end
-  if led_scale == 0 then
     if not led_blank then
       badge.led.clear()
       badge.led.show()
@@ -511,39 +475,34 @@ local function draw_leds(now)
 
   if st == ST_MENU or st == ST_PICK then
     local sp = (st == ST_PICK) and pick_sel or save.species
-    local c = TYPE_RGB[G_TY[sp]]
+    local c = TYPE_RGB[GEESE[sp].ty]
     -- triangle-wave breathing, no float math needed beyond the scale
     local phase = now % 2400
     if phase > 1200 then phase = 2400 - phase end
     local k = phase * 255 // 1200
-    ledall(c[1] * k // 255, c[2] * k // 255, c[3] * k // 255)
+    badge.led.set_all(c[1] * k // 255, c[2] * k // 255, c[3] * k // 255)
   elseif st == ST_SEEK then
     local step = (now // 150) % 6 + 1
-    ledset(RING[step], 0, 180, 255)
+    badge.led.set(RING[step], 0, 42, 60)
     local trail = (step == 1) and 6 or step - 1
-    ledset(RING[trail], 0, 50, 90)
+    badge.led.set(RING[trail], 0, 12, 21)
   elseif me and foe then
     if st == ST_RESULT and outcome == 1 then
       local step = (now // 120) % 6 + 1
-      ledset(RING[step], 255, 200, 0)
-      ledset(RING[(step % 6) + 1], 90, 70, 0)
+      badge.led.set(RING[step], 60, 47, 0)
+      badge.led.set(RING[(step % 6) + 1], 21, 16, 0)
     elseif st == ST_RESULT then
       local phase = now % 1600
       if phase > 800 then phase = 1600 - phase end
-      local k = phase * 160 // 800
-      ledall(k, 0, 0)
+      badge.led.set_all(phase * 38 // 800, 0, 0)
     else
-      local mf = me.hp / me.max
-      local ff = foe.hp / foe.max
-      local r, g, b = hp_rgb(mf)
-      led_column(LEFT, mf, r, g, b)
-      r, g, b = hp_rgb(ff)
-      led_column(RIGHT, ff, r, g, b)
+      led_column(LEFT, me.hp / me.max)
+      led_column(RIGHT, foe.hp / foe.max)
     end
     if now < flash_until and flash_rgb then
       local side = (flash_side == 1) and LEFT or RIGHT
       for i = 1, 3 do
-        ledset(side[i], flash_rgb[1], flash_rgb[2], flash_rgb[3])
+        badge.led.set(side[i], flash_rgb[1], flash_rgb[2], flash_rgb[3])
       end
     end
   end
@@ -551,14 +510,14 @@ local function draw_leds(now)
   badge.led.show()
 end
 
--- lifecycle
-local function go_menu(note)
+-- ------------------------------------------------------------ lifecycle --
+local function go_menu()
   radio_stop()
   st = ST_MENU
   me, foe = nil, nil
   is_radio = false
-  build_menu()
-  if note then ui.menu_you:set_text(note) end
+  set_screen()
+  render_menu()
 end
 
 local function begin_seek()
@@ -568,20 +527,23 @@ local function begin_seek()
   -- ~2 s BLE teardown, so only enable when it is actually off.
   if not radio_on then radio_on = badge.radio.enable() end
   if not radio_on then
-    go_menu("Radio unavailable - try Solo practice")
+    status("Radio unavailable - try Solo practice")
+    st = ST_MENU
+    set_screen()
+    render_menu()
+    say("Radio would not start. Reboot and retry.")
     return
   end
   badge.radio.on_recv(on_radio)
-  -- Held from the search through the duel: the badge cannot pair or take a
-  -- turn while asleep. radio_stop() releases it, and the search gives up
-  -- after 60 s, so this is always bounded.
+  -- The badge cannot pair or take a turn while asleep. The 60 s search cap
+  -- and radio_stop() both bound this hold.
   badge.sys.wake_lock(true)
   st = ST_SEEK
   last_rx = badge.sys.ms()
   next_beacon = 0
-  build_battle()
   me = make_fighter(save.species, save.level, 1)
   foe = nil
+  set_screen()
   ui.foe_name:set_text("Looking for a goose...")
   ui.foe_hp:set_text("")
   ui.foe_bar:set_value(0)
@@ -593,8 +555,8 @@ local function begin_seek()
   status("Searching nearby. B cancels.")
 end
 
--- One label helper: the widget setup is otherwise the largest block of
--- repeated constructors in the compiled chunk.
+-- One helper for every label keeps the compiled chunk small: the widget setup
+-- is otherwise the largest block of repeated constructors in the app.
 local function lbl(parent, text, color, small, where, dx, dy)
   local l = badge.ui.label(parent, text)
   if small then l:set_font_size("small") end
@@ -618,106 +580,67 @@ local function panel(parent)
   return p
 end
 
-local function mem_log(tag)
-  local s = badge.sys.stats()
-  badge.sys.log(tag .. " lua=" .. s.lua_used .. "/" .. s.lua_limit ..
-    " peak=" .. s.lua_peak .. " widgets=" .. s.widgets ..
-    " free=" .. s.free_heap)
-end
-
-local function clear_panel()
-  if ui.panel then ui.panel:delete() end
-  ui = {}
-  badge.sys.gc_step()
-  badge.sys.gc_step()
-end
-
-local function ensure_data()
-  if data_loaded then return end
-  load_data()
-  badge.sys.gc_step()
-  badge.sys.gc_step()
-  mem_log("data")
-end
-
-build_menu = function()
-  clear_panel()
-  ensure_data()          -- the menu names your goose, so it needs the data
-  ui.panel = panel(app_bg)
-  ui.menu_item = {}
-  for i = 1, 3 do
-    ui.menu_item[i] = lbl(ui.panel, "", nil, false, "top_left", 40, 30 + (i - 1) * 26)
-  end
-  ui.menu_you = lbl(ui.panel, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
-  lbl(ui.panel, "UP/DOWN choose  A select  L/R LEDs  HOME exit", 0x6b7280, true,
-    "bottom_mid", 0, -10)
-  render_menu()
-end
-
-build_pick = function()
-  clear_panel()
-  ensure_data()
-  ui.panel = panel(app_bg)
-  ui.pick_item = {}
-  for i = 1, NG do
-    ui.pick_item[i] = lbl(ui.panel, "", nil, false, "top_left", 28, 22 + (i - 1) * 24)
-  end
-  ui.pick_stat = lbl(ui.panel, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
-  lbl(ui.panel, "Arrows choose   A confirm   B back", 0x6b7280, true,
-    "bottom_mid", 0, -10)
-  render_pick()
-end
-
-build_battle = function()
-  clear_panel()
-  ensure_data()
-  ui.panel = panel(app_bg)
-  ui.battle = ui.panel
-  ui.foe_name = lbl(ui.panel, "", nil, false, "top_left", 12, 6)
-  ui.foe_hp = lbl(ui.panel, "", nil, true, "top_right", -12, 8)
-  ui.foe_bar = hp_bar(ui.panel, 26, 0xff5a3c)
-  ui.me_name = lbl(ui.panel, "", nil, false, "top_left", 12, 44)
-  ui.me_hp = lbl(ui.panel, "", nil, true, "top_right", -12, 46)
-  ui.me_bar = hp_bar(ui.panel, 64, 0x35d07f)
-  ui.log = lbl(ui.panel, "", 0xe5e7eb, true, "top_mid", 0, 84)
-  ui.move = {}
-  for i = 1, 4 do
-    ui.move[i] = lbl(ui.panel, "", nil, true, "top_left",
-      ((i - 1) % 2 == 0) and 16 or 168, 106 + ((i - 1) // 2) * 22)
-  end
-  ui.status = lbl(ui.panel, "", 0x6b7280, true, "bottom_mid", 0, -10)
-  mem_log("battle-ui")
-end
-
 function on_enter(root)
+  load_data()
   load_save()
 
-  app_bg = badge.ui.box{ parent = root, w = 320, h = 240, bg_color = 0x0d1117 }
-  app_bg:align("center", 0, 0)
-  local title = badge.ui.label(app_bg, "GOOSE DUEL")
+  local bg = badge.ui.box{ parent = root, w = 320, h = 240, bg_color = 0x0d1117 }
+  bg:align("center", 0, 0)
+  local title = badge.ui.label(bg, "GOOSE DUEL")
   title:set_font_size("large")
   title:set_color(0xffc400)
   title:align("top_mid", 0, 8)
-  build_menu()
-  mem_log("menu-ui")
+
+  ui.menu = panel(bg)
+  ui.menu_item = {}
+  for i = 1, 3 do
+    ui.menu_item[i] = lbl(ui.menu, "", nil, false, "top_left", 40, 30 + (i - 1) * 26)
+  end
+  ui.menu_you = lbl(ui.menu, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
+  lbl(ui.menu, "UP/DOWN choose   A select   HOME exit", 0x6b7280, true,
+    "bottom_mid", 0, -10)
+
+  ui.pick = panel(bg)
+  ui.pick_item = {}
+  for i = 1, 4 do
+    ui.pick_item[i] = lbl(ui.pick, "", nil, false, "top_left", 28, 22 + (i - 1) * 24)
+  end
+  ui.pick_stat = lbl(ui.pick, "", 0x6ee7a0, true, "bottom_mid", 0, -34)
+  lbl(ui.pick, "Arrows choose   A confirm   B back", 0x6b7280, true,
+    "bottom_mid", 0, -10)
+
+  ui.battle = panel(bg)
+  ui.foe_name = lbl(ui.battle, "", nil, false, "top_left", 12, 6)
+  ui.foe_hp = lbl(ui.battle, "", nil, true, "top_right", -12, 8)
+  ui.foe_bar = hp_bar(ui.battle, 26, 0xff5a3c)
+  ui.me_name = lbl(ui.battle, "", nil, false, "top_left", 12, 44)
+  ui.me_hp = lbl(ui.battle, "", nil, true, "top_right", -12, 46)
+  ui.me_bar = hp_bar(ui.battle, 64, 0x35d07f)
+  ui.log = lbl(ui.battle, "", 0xe5e7eb, true, "top_mid", 0, 84)
+
+  ui.move = {}
+  for i = 1, 4 do
+    ui.move[i] = lbl(ui.battle, "", nil, true, "top_left",
+      ((i - 1) % 2 == 0) and 16 or 168, 106 + ((i - 1) // 2) * 22)
+  end
+  ui.status = lbl(ui.battle, "", 0x6b7280, true, "bottom_mid", 0, -10)
+
+  go_menu()
 end
 
 function on_tick()
   local now = badge.sys.ms()
-  -- Lua paces its GC against the quota, so a 96 KB limit lets far more
-  -- garbage pile up than a 48 KB one before it collects - and what actually
-  -- runs out here is physical RAM, not the quota. One incremental step per
-  -- tick keeps the real footprint down at negligible cost.
-  badge.sys.gc_step()
 
   if st == ST_SEEK then
     if now >= next_beacon then
       next_beacon = now + 500
       radio_send("GG1:H:" .. my_id .. ":" .. save.species .. ":" .. save.level)
     end
-    -- Advertising forever in a bag is pure drain: give up and drop the radio.
+    -- Advertising forever in a bag is pure drain, and it holds the wake lock
+    -- while it does it: give up and drop the radio.
     if now - last_rx > 60000 then
-      go_menu("No goose nearby. Radio off to save battery.")
+      go_menu()
+      say("No goose nearby. Radio off to save battery.")
     end
   elseif st == ST_BATTLE and is_radio then
     -- The host keeps offering the pairing until the peer's first move proves
@@ -785,35 +708,28 @@ function on_button(button, kind)
     elseif button == B.DOWN then
       menu_sel = (menu_sel == 3) and 1 or menu_sel + 1
       render_menu()
-    elseif button == B.LEFT or button == B.RIGHT then
-      if button == B.RIGHT then
-        led_level = (led_level == 4) and 1 or led_level + 1
-      else
-        led_level = (led_level == 1) and 4 or led_level - 1
-      end
-      dirty = true
-      render_menu()
     elseif button == B.A then
       if menu_sel == 1 then
         begin_seek()
       elseif menu_sel == 2 then
         is_radio = false
         rng = badge.sys.random(65536) % 65537
-        start_battle(badge.sys.random(NG) + 1,
+        start_battle(badge.sys.random(#GEESE) + 1,
           save.level > 2 and save.level - 1 or 1)
       else
         pick_sel = save.species
         st = ST_PICK
-        build_pick()
+        set_screen()
+        render_pick()
       end
     end
 
   elseif st == ST_PICK then
     if button == B.UP or button == B.LEFT then
-      pick_sel = (pick_sel == 1) and NG or pick_sel - 1
+      pick_sel = (pick_sel == 1) and #GEESE or pick_sel - 1
       render_pick()
     elseif button == B.DOWN or button == B.RIGHT then
-      pick_sel = (pick_sel == NG) and 1 or pick_sel + 1
+      pick_sel = (pick_sel == #GEESE) and 1 or pick_sel + 1
       render_pick()
     elseif button == B.A then
       save.species = pick_sel
@@ -831,7 +747,10 @@ function on_button(button, kind)
     -- Forfeit stays available after committing a move, so a vanished opponent
     -- does not trap you until the contact timeout fires.
     if button == B.B then
-      forfeit()
+      -- Bye means "I quit", so a forfeit is the one place a finish announces
+      -- itself: the peer wins immediately instead of waiting out the timeout.
+      if is_radio then radio_send("GG1:B:" .. my_id) end
+      finish(false)
       return
     end
     if my_move then return end
@@ -855,7 +774,7 @@ function on_button(button, kind)
         begin_seek()
       else
         rng = badge.sys.random(65536) % 65537
-        start_battle(badge.sys.random(NG) + 1,
+        start_battle(badge.sys.random(#GEESE) + 1,
           save.level > 2 and save.level - 1 or 1)
       end
     elseif button == B.B then
